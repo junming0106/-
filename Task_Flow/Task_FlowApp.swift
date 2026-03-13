@@ -1,10 +1,3 @@
-//
-//  Task_FlowApp.swift
-//  Task_Flow
-//
-//  Created by 黃浚銘 on 2026/3/12.
-//
-
 import SwiftUI
 import SwiftData
 
@@ -12,14 +5,29 @@ import SwiftData
 struct Task_FlowApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
-            Item.self,
+            TaskItem.self,
+            SubTask.self,
+            BoardColumn.self,
+            CardConnection.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
         do {
             return try ModelContainer(for: schema, configurations: [modelConfiguration])
         } catch {
-            fatalError("Could not create ModelContainer: \(error)")
+            // Schema migration failed — remove old store and retry
+            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            let storeURL = appSupport.appendingPathComponent("default.store")
+            for ext in ["", "-wal", "-shm"] {
+                let url = storeURL.deletingLastPathComponent()
+                    .appendingPathComponent(storeURL.lastPathComponent + ext)
+                try? FileManager.default.removeItem(at: url)
+            }
+            do {
+                return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            } catch {
+                fatalError("Could not create ModelContainer after reset: \(error)")
+            }
         }
     }()
 
@@ -28,5 +36,7 @@ struct Task_FlowApp: App {
             ContentView()
         }
         .modelContainer(sharedModelContainer)
+        .windowStyle(.titleBar)
+        .defaultSize(width: 1200, height: 750)
     }
 }

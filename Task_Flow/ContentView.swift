@@ -1,59 +1,134 @@
-//
-//  ContentView.swift
-//  Task_Flow
-//
-//  Created by 黃浚銘 on 2026/3/12.
-//
-
 import SwiftUI
 import SwiftData
 
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+    @State private var viewModel = BoardViewModel()
+    @State private var selectedSection: SidebarSection = .board
+    @State private var showAIAssistant = false
 
     var body: some View {
         NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
-                    }
-                }
-                .onDelete(perform: deleteItems)
-            }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-            .toolbar {
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
-                }
-            }
+            SidebarView(selection: $selectedSection)
+                .navigationSplitViewColumnWidth(min: 180, ideal: 200)
         } detail: {
-            Text("Select an item")
-        }
-    }
+            ZStack(alignment: .bottomTrailing) {
+                switch selectedSection {
+                case .board:
+                    HSplitView {
+                        KanbanBoardView(viewModel: viewModel, showAIAssistant: $showAIAssistant)
+                            .frame(minWidth: 600)
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
+                        if let task = viewModel.selectedTask {
+                            TaskDetailView(task: task)
+                                .frame(minWidth: 300, idealWidth: 350)
+                        }
+                    }
+                }
 
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
+                // AI Assistant floating panel or button
+                if showAIAssistant {
+                    AIAssistantView(isPresented: $showAIAssistant)
+                        .padding(20)
+                        .transition(.asymmetric(
+                            insertion: .scale(scale: 0.9, anchor: .bottomTrailing)
+                                .combined(with: .opacity),
+                            removal: .scale(scale: 0.95, anchor: .bottomTrailing)
+                                .combined(with: .opacity)
+                        ))
+                } else {
+                    // Floating AI button — bottom right
+                    Button(action: {
+                        withAnimation(.spring(response: 0.3)) {
+                            showAIAssistant = true
+                        }
+                    }) {
+                        Image(systemName: "sparkles")
+                            .font(.title2)
+                            .fontWeight(.medium)
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [.purple, .blue, .cyan],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 48, height: 48)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
+                            .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(20)
+                    .help("AI Assistant (⌘⇧A)")
+                }
             }
         }
+        .navigationTitle("TaskFlow")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button(action: { viewModel.showingNewColumnSheet = true }) {
+                    Label("New Column", systemImage: "plus.rectangle.on.rectangle")
+                }
+                .help("Add New Column")
+
+                Button(action: {
+                    if viewModel.selectedTask != nil {
+                        viewModel.selectedTask = nil
+                    }
+                }) {
+                    Label("Close Detail", systemImage: "sidebar.right")
+                }
+                .disabled(viewModel.selectedTask == nil)
+            }
+        }
+        .background {
+            Button("") {
+                withAnimation(.spring(response: 0.3)) {
+                    showAIAssistant.toggle()
+                }
+            }
+            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .hidden()
+        }
+    }
+}
+
+enum SidebarSection: String, CaseIterable, Identifiable {
+    case board = "Board"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .board: return "kanban.rectangle"
+        }
+    }
+}
+
+struct SidebarView: View {
+    @Binding var selection: SidebarSection
+
+    var body: some View {
+        List {
+            ForEach(SidebarSection.allCases) { section in
+                Button(action: { selection = section }) {
+                    Label(section.rawValue, systemImage: section.icon)
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, 4)
+                .padding(.horizontal, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(selection == section ? Color.accentColor.opacity(0.12) : Color.clear)
+                )
+            }
+        }
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
     }
 }
 
 #Preview {
     ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+        .modelContainer(for: [TaskItem.self, SubTask.self, BoardColumn.self, CardConnection.self], inMemory: true)
 }
