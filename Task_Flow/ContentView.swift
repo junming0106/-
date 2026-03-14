@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var viewModel = BoardViewModel()
     @State private var selectedBoardID: UUID?
     @State private var showAIAssistant = false
+    @State private var showSettings = false
 
     private var selectedBoard: Board? {
         guard let id = selectedBoardID else { return boards.first }
@@ -20,15 +21,21 @@ struct ContentView: View {
                 boards: boards,
                 selectedBoardID: Binding(
                     get: { selectedBoard?.id },
-                    set: { selectedBoardID = $0 }
+                    set: {
+                        selectedBoardID = $0
+                        showSettings = false
+                    }
                 ),
+                showSettings: $showSettings,
                 onCreateBoard: createBoard,
                 onDeleteBoard: deleteBoard
             )
             .navigationSplitViewColumnWidth(min: 220, ideal: 240)
         } detail: {
             ZStack(alignment: .bottomTrailing) {
-                if let board = selectedBoard {
+                if showSettings {
+                    SettingsView()
+                } else if let board = selectedBoard {
                     HSplitView {
                         KanbanBoardView(
                             viewModel: viewModel,
@@ -46,8 +53,8 @@ struct ContentView: View {
                     emptyBoardState
                 }
 
-                // AI Assistant floating panel or button
-                if showAIAssistant {
+                // AI Assistant floating panel or button (hidden in settings)
+                if showAIAssistant && !showSettings {
                     AIAssistantView(isPresented: $showAIAssistant)
                         .padding(20)
                         .transition(.asymmetric(
@@ -56,15 +63,15 @@ struct ContentView: View {
                             removal: .scale(scale: 0.95, anchor: .bottomTrailing)
                                 .combined(with: .opacity)
                         ))
-                } else {
+                } else if !showSettings {
                     aiFloatingButton
                 }
             }
         }
-        .navigationTitle(selectedBoard?.name ?? "TaskFlow")
+        .navigationTitle(showSettings ? "Settings" : (selectedBoard?.name ?? "TaskFlow"))
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                if selectedBoard != nil {
+                if selectedBoard != nil && !showSettings {
                     Button(action: { viewModel.showingNewColumnSheet = true }) {
                         Label("New Column", systemImage: "plus.rectangle.on.rectangle")
                     }
@@ -282,6 +289,7 @@ struct ContentView: View {
 struct SidebarView: View {
     let boards: [Board]
     @Binding var selectedBoardID: UUID?
+    @Binding var showSettings: Bool
     let onCreateBoard: () -> Void
     let onDeleteBoard: (Board) -> Void
 
@@ -574,6 +582,33 @@ struct SidebarView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    showSettings = true
+                }
+            }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 14))
+                        .foregroundStyle(showSettings ? .primary.opacity(0.8) : .secondary.opacity(0.6))
+
+                    Text("Settings")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(showSettings ? .primary.opacity(0.8) : .secondary.opacity(0.6))
+
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(showSettings ? Color.primary.opacity(isDark ? 0.08 : 0.05) : .clear)
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 4)
         }
         .padding(.bottom, 4)
     }
@@ -624,5 +659,5 @@ struct SidebarView: View {
 
 #Preview {
     ContentView()
-        .modelContainer(for: [TaskItem.self, SubTask.self, BoardColumn.self, CardConnection.self, Board.self], inMemory: true)
+        .modelContainer(for: [TaskItem.self, SubTask.self, BoardColumn.self, CardConnection.self, Board.self, Workspace.self], inMemory: true)
 }

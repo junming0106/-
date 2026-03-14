@@ -40,5 +40,10 @@ struct Task_FlowApp: App {
         .modelContainer(sharedModelContainer)
         .windowStyle(.titleBar)
         .defaultSize(width: 1200, height: 750)
+
+        Settings {
+            SettingsView()
+                .frame(width: 680, height: 480)
+        }
     }
 }
