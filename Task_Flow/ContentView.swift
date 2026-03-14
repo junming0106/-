@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var selectedBoardID: UUID?
     @State private var showAIAssistant = false
     @State private var showSettings = false
+    @AppStorage("sidebarWidth") private var sidebarWidth: Double = 240
 
     private var selectedBoard: Board? {
         guard let id = selectedBoardID else { return boards.first }
@@ -30,7 +31,7 @@ struct ContentView: View {
                 onCreateBoard: createBoard,
                 onDeleteBoard: deleteBoard
             )
-            .navigationSplitViewColumnWidth(min: 220, ideal: 240)
+            .navigationSplitViewColumnWidth(min: 180, ideal: CGFloat(sidebarWidth), max: 360)
         } detail: {
             ZStack(alignment: .bottomTrailing) {
                 if showSettings {
@@ -499,6 +500,7 @@ struct SidebarView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
+            .contentShape(Rectangle())
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(boardRowBackground(isSelected: isSelected, isHovered: isHovered, color: board.displayColor))
@@ -591,11 +593,11 @@ struct SidebarView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "gearshape")
                         .font(.system(size: 14))
-                        .foregroundStyle(showSettings ? .primary.opacity(0.8) : .secondary.opacity(0.6))
+                        .foregroundStyle(showSettings ? .primary.opacity(0.8) : Color.secondary.opacity(0.6))
 
                     Text("Settings")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(showSettings ? .primary.opacity(0.8) : .secondary.opacity(0.6))
+                        .foregroundStyle(showSettings ? .primary.opacity(0.8) : Color.secondary.opacity(0.6))
 
                     Spacer()
                 }

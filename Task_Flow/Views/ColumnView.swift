@@ -106,7 +106,11 @@ struct ColumnView: View {
     private var connectionModeOverlay: some View {
         if viewModel.isConnecting {
             RoundedRectangle(cornerRadius: AppTheme.Radius.column, style: .continuous)
-                .stroke(Color.orange.opacity(0.6), lineWidth: 2.5)
+                .fill(Color.orange.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppTheme.Radius.column, style: .continuous)
+                        .stroke(Color.orange.opacity(0.6), lineWidth: 2.5)
+                )
                 .overlay(
                     Image(systemName: "bolt.circle.fill")
                         .font(.title)
@@ -117,6 +121,7 @@ struct ColumnView: View {
                         .offset(y: -18),
                     alignment: .top
                 )
+                .contentShape(Rectangle())
                 .onTapGesture {
                     viewModel.finishConnecting(to: column, context: modelContext)
                 }
@@ -213,7 +218,7 @@ struct ColumnView: View {
             .help("Connect to another column")
 
             // Delete column
-            HeaderButton(icon: "xmark.circle.fill", tint: Color.secondary.opacity(0.5), size: .system(size: 18)) {
+            HeaderButton(icon: "xmark.circle.fill", tint: .red.opacity(0.6), size: .system(size: 22)) {
                 viewModel.deleteColumn(column, context: modelContext)
             }
             .help("Delete Column")
@@ -369,7 +374,7 @@ struct AddTaskInlineButton: View {
                 Text("New Task")
                     .font(.system(size: 14, weight: .semibold))
             }
-            .foregroundStyle(isHovering ? Color.accentColor : Color.secondary.opacity(0.5))
+            .foregroundStyle(isHovering ? Color.accentColor : Color.secondary.opacity(0.7))
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
             .background(

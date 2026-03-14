@@ -21,6 +21,8 @@ struct KanbanBoardView: View {
     @Binding var showAIAssistant: Bool
     let board: Board
 
+    @AppStorage("showGridBackground") private var showGridBackground = true
+
     /// Columns belonging to the current board
     private var columns: [BoardColumn] {
         allColumns.filter { $0.board?.id == board.id }
@@ -34,9 +36,18 @@ struct KanbanBoardView: View {
     @State private var columnFrames: [UUID: CGRect] = [:]
     @State private var pendingDeleteConnection: CardConnection?
 
+    // View frame for mouse position calculations
+    @State private var viewFrame: CGRect = .zero
+
+    // Selection
+    @State private var selectedColumnIDs: Set<UUID> = []
+    @State private var selectionRect: CGRect? = nil
+    @State private var selectionStart: CGPoint = .zero
+    @State private var isSelecting = false
+    @State private var isShiftHeld = false
+
     // Canvas pan
     @State private var currentPan: CGSize = .zero
-    @GestureState private var gesturePan: CGSize = .zero
 
     // Canvas zoom (anchored to mouse position)
     @State private var currentScale: CGFloat = 1.0
@@ -44,110 +55,209 @@ struct KanbanBoardView: View {
     @State private var zoomStartPan: CGSize?
     @State private var zoomAnchorScreen: CGPoint = .zero
 
-    private var totalOffset: CGSize {
-        CGSize(
-            width: currentPan.width + gesturePan.width,
-            height: currentPan.height + gesturePan.height
-        )
-    }
+    private var totalOffset: CGSize { currentPan }
 
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 AmbientGradientView()
-                GridBackgroundView()
+                if showGridBackground {
+                    GridBackgroundView()
+                }
 
                 canvasContent
             }
             .clipped()
-            .onAppear { }
+            .onAppear { viewFrame = geo.frame(in: .global) }
+            .onChange(of: geo.size) { _, _ in viewFrame = geo.frame(in: .global) }
             .sheet(isPresented: $viewModel.showingNewTaskSheet) {
                 if let column = viewModel.newTaskColumnTarget {
                     NewTaskView(column: column, viewModel: viewModel)
                 }
             }
+            .overlay {
+                // Transparent overlay that captures Shift+drag for selection
+                // Must sit on top of all child views to intercept their gestures
+                Color.clear
+                    .contentShape(Rectangle())
+                    .allowsHitTesting(isShiftHeld || isSelecting)
+                    .gesture(selectionDragGesture)
+            }
+            .overlay {
+                // Selection rectangle visual (in screen space)
+                if let rect = selectionRect {
+                    Rectangle()
+                        .fill(Color.blue.opacity(0.08))
+                        .overlay(
+                            Rectangle()
+                                .stroke(Color.blue.opacity(0.5), lineWidth: 1)
+                        )
+                        .frame(width: rect.width, height: rect.height)
+                        .position(x: rect.midX, y: rect.midY)
+                        .allowsHitTesting(false)
+                }
+            }
             .gesture(canvasPanGesture)
             .gesture(canvasZoomGesture(in: geo))
+            .onAppear { setupShiftMonitor() }
+            .onDisappear { removeShiftMonitor() }
             .contextMenu {
-                Button(action: {
-                    captureMousePosition(in: geo)
-                    viewModel.createColumnAtPosition(
-                        context: modelContext,
-                        columns: columns,
-                        canvasOffset: totalOffset,
-                        board: board
-                    )
-                }) {
-                    Label("New Column Here", systemImage: "plus.rectangle.on.rectangle")
-                }
+                if !selectedColumnIDs.isEmpty {
+                    // Selection context menu
+                    let count = selectedColumnIDs.count
 
-                Button(action: {
-                    captureMousePosition(in: geo)
-                    let pos = viewModel.newColumnPosition ?? CGPoint(x: 200, y: 200)
-                    let canvasX = pos.x - totalOffset.width
-                    let canvasY = pos.y - totalOffset.height
-                    let ws = Workspace(
-                        name: "Workspace",
-                        positionX: canvasX - Workspace.defaultWidth / 2,
-                        positionY: canvasY - Workspace.defaultHeight / 2,
-                        order: workspaces.count
-                    )
-                    ws.board = board
-                    modelContext.insert(ws)
-                    viewModel.newColumnPosition = nil
-                }) {
-                    Label("New Workspace Here", systemImage: "rectangle.dashed")
-                }
+                    Text("\(count) Columns Selected")
+                        .font(.headline)
 
-                Button(action: {
-                    withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-                        viewModel.autoArrangeColumns(columns, connections: connections, workspaces: workspaces)
+                    Divider()
+
+                    // Move to workspace
+                    if !workspaces.isEmpty {
+                        Menu("Move to Workspace") {
+                            ForEach(workspaces) { ws in
+                                Button(action: {
+                                    withAnimation(.spring(response: 0.3)) {
+                                        moveColumnsToWorkspace(selectedColumns, workspace: ws)
+                                        selectedColumnIDs.removeAll()
+                                    }
+                                }) {
+                                    Label(ws.name.isEmpty ? "Untitled" : ws.name, systemImage: "rectangle.dashed")
+                                }
+                            }
+                        }
                     }
-                }) {
-                    Label("Auto Arrange", systemImage: "rectangle.3.group")
-                }
 
-                Divider()
-
-                Button(action: {
-                    withAnimation(.spring(response: 0.3)) {
-                        showAIAssistant.toggle()
+                    // Create new workspace from selection
+                    Button(action: {
+                        withAnimation(.spring(response: 0.3)) {
+                            createWorkspaceFromSelection()
+                        }
+                    }) {
+                        Label("Group into New Workspace", systemImage: "rectangle.dashed.badge.record")
                     }
-                }) {
-                    Label(showAIAssistant ? "Hide AI Assistant" : "AI Assistant", systemImage: "sparkles")
-                }
 
-                Divider()
-
-                if viewModel.isConnecting {
-                    Button(action: { viewModel.cancelConnecting() }) {
-                        Label("Cancel Connection", systemImage: "xmark.circle")
+                    // Remove from workspace
+                    if selectedColumns.contains(where: { $0.workspace != nil }) {
+                        Button(action: {
+                            withAnimation(.spring(response: 0.3)) {
+                                for col in selectedColumns {
+                                    col.workspace = nil
+                                }
+                                selectedColumnIDs.removeAll()
+                            }
+                        }) {
+                            Label("Remove from Workspace", systemImage: "rectangle.badge.minus")
+                        }
                     }
-                }
 
-                Button(action: {
-                    zoomAtMouse(by: 0.2, in: geo)
-                }) {
-                    Label("Zoom In", systemImage: "plus.magnifyingglass")
-                }
+                    Divider()
 
-                Button(action: {
-                    zoomAtMouse(by: -0.2, in: geo)
-                }) {
-                    Label("Zoom Out", systemImage: "minus.magnifyingglass")
-                }
-
-                Button(action: { fitAllColumns(in: geo) }) {
-                    Label("Fit All", systemImage: "arrow.up.left.and.arrow.down.right")
-                }
-
-                Button(action: {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                        currentPan = .zero
-                        currentScale = 1.0
+                    // Select all
+                    Button(action: {
+                        selectedColumnIDs = Set(columns.map(\.id))
+                    }) {
+                        Label("Select All", systemImage: "checkmark.rectangle.stack")
                     }
-                }) {
-                    Label("Reset View", systemImage: "arrow.counterclockwise")
+
+                    Button(action: {
+                        selectedColumnIDs.removeAll()
+                    }) {
+                        Label("Deselect All", systemImage: "xmark.rectangle")
+                    }
+
+                    Divider()
+
+                    // Delete selected
+                    Button(role: .destructive, action: {
+                        withAnimation(.spring(response: 0.3)) {
+                            for col in selectedColumns {
+                                viewModel.deleteColumn(col, context: modelContext)
+                            }
+                            selectedColumnIDs.removeAll()
+                        }
+                    }) {
+                        Label("Delete \(count) Columns", systemImage: "trash")
+                    }
+                } else {
+                    // Normal canvas context menu
+                    Button(action: {
+                        let pos = mouseCanvasPosition()
+                        let newCol = BoardColumn(
+                            title: "New Column",
+                            order: columns.count,
+                            positionX: pos.x - 160,
+                            positionY: pos.y - 200
+                        )
+                        newCol.board = board
+                        modelContext.insert(newCol)
+                    }) {
+                        Label("New Column Here", systemImage: "plus.rectangle.on.rectangle")
+                    }
+
+                    Button(action: {
+                        let pos = mouseCanvasPosition()
+                        let ws = Workspace(
+                            name: "Workspace",
+                            positionX: pos.x - Workspace.defaultWidth / 2,
+                            positionY: pos.y - Workspace.defaultHeight / 2,
+                            order: workspaces.count
+                        )
+                        ws.board = board
+                        modelContext.insert(ws)
+                    }) {
+                        Label("New Workspace Here", systemImage: "rectangle.dashed")
+                    }
+
+                    Button(action: {
+                        withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
+                            viewModel.autoArrangeColumns(columns, connections: connections, workspaces: workspaces)
+                        }
+                    }) {
+                        Label("Auto Arrange", systemImage: "rectangle.3.group")
+                    }
+
+                    Divider()
+
+                    Button(action: {
+                        withAnimation(.spring(response: 0.3)) {
+                            showAIAssistant.toggle()
+                        }
+                    }) {
+                        Label(showAIAssistant ? "Hide AI Assistant" : "AI Assistant", systemImage: "sparkles")
+                    }
+
+                    Divider()
+
+                    if viewModel.isConnecting {
+                        Button(action: { viewModel.cancelConnecting() }) {
+                            Label("Cancel Connection", systemImage: "xmark.circle")
+                        }
+                    }
+
+                    Button(action: {
+                        zoomAtMouse(by: 0.2, in: geo)
+                    }) {
+                        Label("Zoom In", systemImage: "plus.magnifyingglass")
+                    }
+
+                    Button(action: {
+                        zoomAtMouse(by: -0.2, in: geo)
+                    }) {
+                        Label("Zoom Out", systemImage: "minus.magnifyingglass")
+                    }
+
+                    Button(action: { fitAllColumns(in: geo) }) {
+                        Label("Fit All", systemImage: "arrow.up.left.and.arrow.down.right")
+                    }
+
+                    Button(action: {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                            currentPan = .zero
+                            currentScale = 1.0
+                        }
+                    }) {
+                        Label("Reset View", systemImage: "arrow.counterclockwise")
+                    }
                 }
             }
             .onTapGesture {
@@ -155,6 +265,11 @@ struct KanbanBoardView: View {
                     viewModel.cancelConnecting()
                 }
                 pendingDeleteConnection = nil
+                if !selectedColumnIDs.isEmpty {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        selectedColumnIDs.removeAll()
+                    }
+                }
             }
         }
         .sheet(isPresented: $viewModel.showingNewColumnSheet) {
@@ -174,6 +289,52 @@ struct KanbanBoardView: View {
                 WorkspaceView(workspace: ws, viewModel: viewModel, columnFrames: columnFrames)
                     .offset(wsOffset)
                     .gesture(workspaceDragGesture(for: ws))
+                    .contextMenu {
+                        Button(action: {
+                            let pos = mouseCanvasPosition()
+                            // Column uses .position(x: posX + 160, y: posY + 200), so offset back
+                            let colX = pos.x - 160
+                            let colY = pos.y - 200
+                            let newCol = BoardColumn(
+                                title: "New Column",
+                                order: columns.count,
+                                positionX: colX,
+                                positionY: colY
+                            )
+                            newCol.board = board
+                            newCol.workspace = ws
+                            modelContext.insert(newCol)
+                            ws.expandToFitColumns(columnFrames: columnFrames)
+                        }) {
+                            Label("Add Column", systemImage: "plus.rectangle.on.rectangle")
+                        }
+
+                        Button(action: {
+                            withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
+                                let wsCols = columns.filter { $0.workspace?.id == ws.id }
+                                let wsConns = connections.filter { conn in
+                                    let ids = Set(wsCols.map(\.id))
+                                    return ids.contains(conn.fromColumnID) && ids.contains(conn.toColumnID)
+                                }
+                                viewModel.autoArrangeColumns(wsCols, connections: Array(wsConns), workspaces: [ws])
+                            }
+                        }) {
+                            Label("Auto Arrange", systemImage: "rectangle.3.group")
+                        }
+
+                        Divider()
+
+                        Button(role: .destructive, action: {
+                            withAnimation(.spring(response: 0.3)) {
+                                for col in ws.columns {
+                                    col.workspace = nil
+                                }
+                                modelContext.delete(ws)
+                            }
+                        }) {
+                            Label("Delete Workspace", systemImage: "trash")
+                        }
+                    }
             }
 
             // Connection lines between columns
@@ -224,19 +385,160 @@ struct KanbanBoardView: View {
                 .offset(extraOffset)
                 .zIndex(isDragging ? 100 : 0)
                 .shadow(color: isDragging ? .black.opacity(0.2) : .clear, radius: isDragging ? 12 : 0, y: isDragging ? 6 : 0)
+                .overlay {
+                    if selectedColumnIDs.contains(column.id) {
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.column, style: .continuous)
+                            .stroke(Color.blue.opacity(0.8), lineWidth: 2.5)
+                            .background(
+                                RoundedRectangle(cornerRadius: AppTheme.Radius.column, style: .continuous)
+                                    .fill(Color.blue.opacity(0.08))
+                            )
+                    }
+                }
                 .position(
                     x: column.positionX + 160,
                     y: column.positionY + 200
                 )
                 .gesture(columnDragGesture(for: column))
+                .onTapGesture {
+                    // Toggle selection on tap
+                    if NSEvent.modifierFlags.contains(.command) {
+                        if selectedColumnIDs.contains(column.id) {
+                            selectedColumnIDs.remove(column.id)
+                        } else {
+                            selectedColumnIDs.insert(column.id)
+                        }
+                    } else if !selectedColumnIDs.isEmpty {
+                        selectedColumnIDs.removeAll()
+                    }
+                }
                 .contextMenu {
-                    if column.workspace != nil {
+                    if selectedColumnIDs.contains(column.id) && selectedColumnIDs.count > 1 {
+                        // Batch operations for selected columns
+                        let count = selectedColumnIDs.count
+
+                        Text("\(count) Columns Selected")
+                            .font(.headline)
+
+                        Divider()
+
+                        if !workspaces.isEmpty {
+                            Menu("Move to Workspace") {
+                                ForEach(workspaces) { ws in
+                                    Button(action: {
+                                        withAnimation(.spring(response: 0.3)) {
+                                            moveColumnsToWorkspace(selectedColumns, workspace: ws)
+                                            selectedColumnIDs.removeAll()
+                                        }
+                                    }) {
+                                        Label(ws.name.isEmpty ? "Untitled" : ws.name, systemImage: "rectangle.dashed")
+                                    }
+                                }
+                            }
+                        }
+
                         Button(action: {
                             withAnimation(.spring(response: 0.3)) {
-                                column.workspace = nil
+                                createWorkspaceFromSelection()
                             }
                         }) {
-                            Label("Remove from Workspace", systemImage: "rectangle.badge.minus")
+                            Label("Group into New Workspace", systemImage: "rectangle.dashed.badge.record")
+                        }
+
+                        if selectedColumns.contains(where: { $0.workspace != nil }) {
+                            Button(action: {
+                                withAnimation(.spring(response: 0.3)) {
+                                    for col in selectedColumns {
+                                        col.workspace = nil
+                                    }
+                                    selectedColumnIDs.removeAll()
+                                }
+                            }) {
+                                Label("Remove from Workspace", systemImage: "rectangle.badge.minus")
+                            }
+                        }
+
+                        Divider()
+
+                        Button(action: {
+                            selectedColumnIDs = Set(columns.map(\.id))
+                        }) {
+                            Label("Select All", systemImage: "checkmark.rectangle.stack")
+                        }
+
+                        Button(action: {
+                            selectedColumnIDs.removeAll()
+                        }) {
+                            Label("Deselect All", systemImage: "xmark.rectangle")
+                        }
+
+                        Divider()
+
+                        Button(role: .destructive, action: {
+                            withAnimation(.spring(response: 0.3)) {
+                                for col in selectedColumns {
+                                    viewModel.deleteColumn(col, context: modelContext)
+                                }
+                                selectedColumnIDs.removeAll()
+                            }
+                        }) {
+                            Label("Delete \(count) Columns", systemImage: "trash")
+                        }
+                    } else {
+                        // Single column context menu
+                        Button(action: {
+                            viewModel.newTaskColumnTarget = column
+                            viewModel.showingNewTaskSheet = true
+                        }) {
+                            Label("Add Task", systemImage: "plus.square")
+                        }
+
+                        Divider()
+
+                        Button(action: {
+                            viewModel.startConnecting(from: column)
+                        }) {
+                            Label("Connect to…", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                        }
+
+                        if column.workspace != nil {
+                            Button(action: {
+                                withAnimation(.spring(response: 0.3)) {
+                                    column.workspace = nil
+                                }
+                            }) {
+                                Label("Remove from Workspace", systemImage: "rectangle.badge.minus")
+                            }
+                        } else if !workspaces.isEmpty {
+                            Menu("Move to Workspace") {
+                                ForEach(workspaces) { ws in
+                                    Button(action: {
+                                        withAnimation(.spring(response: 0.3)) {
+                                            moveColumnsToWorkspace([column], workspace: ws)
+                                        }
+                                    }) {
+                                        Label(ws.name.isEmpty ? "Untitled" : ws.name, systemImage: "rectangle.dashed")
+                                    }
+                                }
+                            }
+                        }
+
+                        Divider()
+
+                        Button(action: {
+                            duplicateColumn(column)
+                        }) {
+                            Label("Duplicate Column", systemImage: "plus.square.on.square")
+                        }
+
+                        Divider()
+
+                        Button(role: .destructive, action: {
+                            withAnimation(.spring(response: 0.3)) {
+                                viewModel.deleteColumn(column, context: modelContext)
+                            }
+                        }) {
+                            Label("Delete Column", systemImage: "trash")
                         }
                     }
                 }
@@ -325,6 +627,40 @@ struct KanbanBoardView: View {
             }
     }
 
+    /// Duplicate a column (with its tasks)
+    private func duplicateColumn(_ column: BoardColumn) {
+        let newCol = BoardColumn(
+            title: column.title + " Copy",
+            order: columns.count,
+            colorName: column.colorName,
+            iconName: column.iconName,
+            positionX: column.positionX + 40,
+            positionY: column.positionY + 40
+        )
+        newCol.board = board
+        newCol.workspace = column.workspace
+        modelContext.insert(newCol)
+
+        // Duplicate tasks
+        for task in column.sortedTasks {
+            let newTask = TaskItem(
+                title: task.title,
+                taskDescription: task.taskDescription,
+                priority: task.priority,
+                dueDate: task.dueDate,
+                tags: task.tags,
+                order: task.order
+            )
+            newTask.column = newCol
+            modelContext.insert(newTask)
+        }
+
+        // Expand workspace if needed
+        if let ws = newCol.workspace {
+            ws.expandToFitColumns(columnFrames: columnFrames)
+        }
+    }
+
     /// Check if column center (in canvas space) falls inside any workspace bounds
     private func assignColumnToWorkspace(_ column: BoardColumn) {
         // Column center in canvas space
@@ -371,16 +707,170 @@ struct KanbanBoardView: View {
         CGRect(x: ws.positionX, y: ws.positionY, width: ws.width, height: ws.height)
     }
 
-    // MARK: - Canvas Pan & Zoom
+    // MARK: - Selected columns helper
 
+    private var selectedColumns: [BoardColumn] {
+        columns.filter { selectedColumnIDs.contains($0.id) }
+    }
+
+    /// Move columns into a workspace, repositioning them in a row inside the workspace
+    private func moveColumnsToWorkspace(_ cols: [BoardColumn], workspace ws: Workspace) {
+        let movingIDs = Set(cols.map(\.id))
+        let sorted = cols.sorted { $0.order < $1.order }
+        let spacingX: Double = 400
+        let pad = Workspace.padding
+
+        // Existing columns already in this workspace (exclude the ones being moved)
+        let existingCols = columns.filter { $0.workspace?.id == ws.id && !movingIDs.contains($0.id) }
+        let existingMaxX = existingCols.map { $0.positionX + 320 }.max()
+
+        // Start X: after existing columns, or at workspace left + padding
+        let startX: Double
+        if let maxX = existingMaxX {
+            startX = maxX + (spacingX - 320)
+        } else {
+            startX = ws.positionX + pad
+        }
+        let startY = ws.positionY + pad + 28 - 50
+
+        // Position columns in a row
+        for (i, col) in sorted.enumerated() {
+            col.workspace = ws
+            col.positionX = startX + Double(i) * spacingX
+            col.positionY = startY
+            col.order = existingCols.count + i
+        }
+
+        // Fit workspace to all its columns (shrink + grow)
+        var estimatedFrames: [UUID: CGRect] = [:]
+        let allWsCols = existingCols + sorted
+        for col in allWsCols {
+            estimatedFrames[col.id] = CGRect(
+                x: col.positionX, y: col.positionY + 50,
+                width: 320, height: 300
+            )
+        }
+        ws.fitToColumns(columnFrames: estimatedFrames)
+    }
+
+    private func createWorkspaceFromSelection() {
+        let cols = selectedColumns
+        guard !cols.isEmpty else { return }
+
+        // Calculate bounds of selected columns
+        let minX = cols.map { $0.positionX }.min()!
+        let minY = cols.map { $0.positionY + 50 }.min()!
+        let maxX = cols.map { $0.positionX + 320 }.max()!
+        let maxY = cols.map { $0.positionY + 50 + 300 }.max()!
+
+        let pad = Workspace.padding
+        let ws = Workspace(
+            name: "Workspace",
+            positionX: minX - pad,
+            positionY: minY - pad - 28,
+            width: (maxX - minX) + pad * 2,
+            height: (maxY - minY) + pad * 2 + 28,
+            order: workspaces.count
+        )
+        ws.board = board
+        modelContext.insert(ws)
+
+        for col in cols {
+            col.workspace = ws
+        }
+        selectedColumnIDs.removeAll()
+    }
+
+    /// Convert screen-space rect to canvas-space rect (accounting for pan & scale)
+    private func screenToCanvasRect(_ screenRect: CGRect) -> CGRect {
+        let x = (screenRect.origin.x - totalOffset.width) / currentScale
+        let y = (screenRect.origin.y - totalOffset.height) / currentScale
+        let w = screenRect.width / currentScale
+        let h = screenRect.height / currentScale
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
+    /// Update selected columns based on selection rectangle intersection
+    private func updateSelectionFromRect(_ screenRect: CGRect) {
+        let canvasRect = screenToCanvasRect(screenRect)
+        var ids = Set<UUID>()
+        for col in columns {
+            // Column frame in canvas space
+            let colRect = columnFrames[col.id] ?? CGRect(
+                x: col.positionX, y: col.positionY + 50,
+                width: 320, height: 300
+            )
+            if canvasRect.intersects(colRect) {
+                ids.insert(col.id)
+            }
+        }
+        selectedColumnIDs = ids
+    }
+
+    // MARK: - Canvas Pan / Select & Zoom
+
+    @State private var panStartOffset: CGSize? = nil
+    @State private var shiftFlagMonitor: Any?
+    @State private var shiftKeyMonitor: Any?
+
+    /// Monitor Shift key press/release to toggle selection overlay hit testing
+    private func setupShiftMonitor() {
+        shiftFlagMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            let shiftNow = event.modifierFlags.contains(.shift)
+            if shiftNow != isShiftHeld {
+                isShiftHeld = shiftNow
+            }
+            return event
+        }
+    }
+
+    private func removeShiftMonitor() {
+        if let monitor = shiftFlagMonitor {
+            NSEvent.removeMonitor(monitor)
+            shiftFlagMonitor = nil
+        }
+    }
+
+    /// Selection gesture — runs on the transparent overlay (only hit-testable when Shift held)
+    private var selectionDragGesture: some Gesture {
+        DragGesture(minimumDistance: 5)
+            .onChanged { value in
+                if !isSelecting {
+                    isSelecting = true
+                    selectionStart = value.startLocation
+                }
+                let origin = CGPoint(
+                    x: min(selectionStart.x, value.location.x),
+                    y: min(selectionStart.y, value.location.y)
+                )
+                let size = CGSize(
+                    width: abs(value.location.x - selectionStart.x),
+                    height: abs(value.location.y - selectionStart.y)
+                )
+                selectionRect = CGRect(origin: origin, size: size)
+                updateSelectionFromRect(selectionRect!)
+            }
+            .onEnded { _ in
+                isSelecting = false
+                selectionRect = nil
+            }
+    }
+
+    /// Pan gesture — only runs on canvas background (not on overlay)
     private var canvasPanGesture: some Gesture {
         DragGesture(minimumDistance: 5)
-            .updating($gesturePan) { value, state, _ in
-                state = value.translation
+            .onChanged { value in
+                if panStartOffset == nil {
+                    panStartOffset = currentPan
+                }
+                let start = panStartOffset!
+                currentPan = CGSize(
+                    width: start.width + value.translation.width,
+                    height: start.height + value.translation.height
+                )
             }
-            .onEnded { value in
-                currentPan.width += value.translation.width
-                currentPan.height += value.translation.height
+            .onEnded { _ in
+                panStartOffset = nil
             }
     }
 
@@ -413,6 +903,19 @@ struct KanbanBoardView: View {
                 zoomStartScale = nil
                 zoomStartPan = nil
             }
+    }
+
+    /// Mouse position converted to canvas coordinates (accounting for pan & scale)
+    private func mouseCanvasPosition() -> CGPoint {
+        guard let window = NSApp.keyWindow else { return .zero }
+        let mouseScreen = NSEvent.mouseLocation
+        let windowRect = window.convertFromScreen(NSRect(origin: mouseScreen, size: .zero))
+        let x = windowRect.origin.x - viewFrame.origin.x
+        let y = viewFrame.height - (windowRect.origin.y - viewFrame.origin.y)
+        // Convert from screen to canvas space
+        let canvasX = (x - currentPan.width) / currentScale
+        let canvasY = (y - currentPan.height) / currentScale
+        return CGPoint(x: canvasX, y: canvasY)
     }
 
     private func mouseLocationInView(geo: GeometryProxy) -> CGPoint {

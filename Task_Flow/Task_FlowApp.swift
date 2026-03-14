@@ -1,6 +1,27 @@
 import SwiftUI
 import SwiftData
 
+/// Wrapper that resolves "system" appearance mode using the actual system colorScheme
+struct AppearanceWrapper<Content: View>: View {
+    let appearanceMode: String
+    @ViewBuilder let content: Content
+
+    @Environment(\.colorScheme) private var systemScheme
+
+    private var resolved: ColorScheme {
+        switch appearanceMode {
+        case "light": return .light
+        case "dark": return .dark
+        default: return systemScheme
+        }
+    }
+
+    var body: some View {
+        content
+            .preferredColorScheme(resolved)
+    }
+}
+
 @main
 struct Task_FlowApp: App {
     var sharedModelContainer: ModelContainer = {
@@ -33,17 +54,23 @@ struct Task_FlowApp: App {
         }
     }()
 
+    @AppStorage("appearanceMode") private var appearanceMode = "system"
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            AppearanceWrapper(appearanceMode: appearanceMode) {
+                ContentView()
+            }
         }
         .modelContainer(sharedModelContainer)
         .windowStyle(.titleBar)
         .defaultSize(width: 1200, height: 750)
 
         Settings {
-            SettingsView()
-                .frame(width: 680, height: 480)
+            AppearanceWrapper(appearanceMode: appearanceMode) {
+                SettingsView()
+                    .frame(width: 680, height: 480)
+            }
         }
     }
 }

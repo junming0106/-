@@ -290,8 +290,8 @@ struct WorkspaceView: View {
     private var nameLabel: some View {
         if isEditingName {
             TextField("Name", text: $workspace.name)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 36, weight: .bold))
+                .foregroundStyle(.primary.opacity(0.7))
                 .textFieldStyle(.plain)
                 .focused($isNameFieldFocused)
                 .onSubmit { finishEditing() }
@@ -306,8 +306,8 @@ struct WorkspaceView: View {
                 .onDisappear { removeClickMonitor() }
         } else {
             Text(workspace.name.isEmpty ? "Untitled" : workspace.name)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(workspace.name.isEmpty ? Color.secondary.opacity(0.3) : Color.secondary.opacity(0.6))
+                .font(.system(size: 36, weight: .bold))
+                .foregroundStyle(workspace.name.isEmpty ? Color.secondary.opacity(0.4) : Color.primary.opacity(0.6))
                 .frame(minWidth: 50, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture { isEditingName = true }

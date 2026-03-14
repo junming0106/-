@@ -49,13 +49,13 @@ struct TaskCardView: View {
 //                    .padding(.top, 6)
 
                 Text(task.title)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 16, weight: .medium))
                     .lineLimit(2)
                     .foregroundStyle(.primary.opacity(0.9))
                 Spacer()
 
                 if isHovering {
-                    HeaderButton(icon: "xmark.circle.fill", tint: Color.secondary, size: .caption) {
+                    HeaderButton(icon: "xmark.circle.fill", tint: .red.opacity(0.6), size: .system(size: 18)) {
                         onDelete()
                     }
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
@@ -64,8 +64,8 @@ struct TaskCardView: View {
 
             if !task.taskDescription.isEmpty {
                 Text(task.taskDescription)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary.opacity(0.85))
                     .lineLimit(2)
             }
 
@@ -80,14 +80,14 @@ struct TaskCardView: View {
             if let dueDate = task.dueDate {
                 let overdue = isDueSoon(dueDate)
                 Label(dueDate.formatted(.dateTime.month(.abbreviated).day()), systemImage: "calendar")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(overdue ? Color.red : Color.secondary.opacity(0.6))
             }
 
             if !task.tags.isEmpty {
                 ForEach(task.tags.prefix(2), id: \.self) { tag in
                     Text(tag)
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(AppTheme.Colors.tagBackground)
@@ -95,7 +95,7 @@ struct TaskCardView: View {
                 }
                 if task.tags.count > 2 {
                     Text("+\(task.tags.count - 2)")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(Color.secondary.opacity(0.6))
                 }
             }
@@ -105,7 +105,7 @@ struct TaskCardView: View {
             if !task.subtasks.isEmpty {
                 let completed = task.subtasks.filter(\.isCompleted).count
                 Label("\(completed)/\(task.subtasks.count)", systemImage: "checklist")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(Color.secondary.opacity(0.6))
             }
         }
@@ -140,7 +140,7 @@ struct TaskColorPicker: View {
     var body: some View {
         VStack(spacing: 10) {
             Text("Card Color")
-                .font(.system(size: 11))
+                .font(.system(size: 13))
                 .fontWeight(.semibold)
 
             LazyVGrid(columns: Array(repeating: GridItem(.fixed(28)), count: 6), spacing: 8) {

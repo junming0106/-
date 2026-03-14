@@ -94,8 +94,11 @@ struct SettingsView: View {
         )
     }
 
+    @State private var hoveredTab: SettingsTab?
+
     private func settingsTabButton(_ tab: SettingsTab) -> some View {
         let isSelected = selectedTab == tab
+        let isHovered = hoveredTab == tab
 
         return Button(action: {
             withAnimation(.easeInOut(duration: 0.15)) {
@@ -105,17 +108,18 @@ struct SettingsView: View {
             HStack(spacing: 10) {
                 Image(systemName: tab.icon)
                     .font(.system(size: 14))
-                    .foregroundStyle(isSelected ? .white : .secondary)
+                    .foregroundStyle(isSelected ? .white : isHovered ? .primary.opacity(0.8) : .secondary)
                     .frame(width: 22)
 
                 Text(tab.rawValue)
                     .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(isSelected ? .white : .primary.opacity(0.7))
+                    .foregroundStyle(isSelected ? .white : .primary.opacity(isHovered ? 0.85 : 0.7))
 
                 Spacer()
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
+            .contentShape(Rectangle())
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(isSelected
@@ -124,11 +128,20 @@ struct SettingsView: View {
                             startPoint: .leading,
                             endPoint: .trailing
                           )
-                          : LinearGradient(colors: [.clear], startPoint: .leading, endPoint: .trailing)
+                          : LinearGradient(
+                            colors: [isHovered ? Color.primary.opacity(isDark ? 0.08 : 0.05) : .clear],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                          )
                     )
             )
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                hoveredTab = hovering ? tab : nil
+            }
+        }
     }
 
     // MARK: - Header
@@ -414,7 +427,9 @@ struct SettingsView: View {
 
     private var settingsBackground: some View {
         ZStack {
-            Color(nsColor: .windowBackgroundColor)
+            (isDark
+                ? Color(red: 0.11, green: 0.11, blue: 0.12)
+                : Color(red: 0.95, green: 0.95, blue: 0.97))
 
             LinearGradient(
                 colors: isDark

@@ -90,45 +90,38 @@ final class BoardViewModel {
             groups[col.workspace?.id, default: []].append(col)
         }
 
-        // Sort workspace groups by order, free columns last
-        let sortedWorkspaces = workspaces
-            .filter { groups[$0.id] != nil }
-            .sorted { $0.order < $1.order }
+        // Sort ALL workspaces by order (including empty ones)
+        let allSortedWorkspaces = workspaces.sorted { $0.order < $1.order }
 
         // Track cumulative Y for stacking workspace groups vertically
         var nextGroupY: Double = 0
 
-        // Arrange workspace groups first, then free columns
-        var orderedKeys: [UUID?] = sortedWorkspaces.map { $0.id }
-        if groups[nil] != nil { orderedKeys.append(nil) }
+        // Determine a common left-align X from the first workspace (or fallback)
+        let pad = Workspace.padding
+        let alignX: Double = allSortedWorkspaces.first.map { $0.positionX + pad } ?? 60
 
-        for wsID in orderedKeys {
-            guard let groupCols = groups[wsID] else { continue }
-            let ws = wsID.flatMap { id in workspaces.first(where: { $0.id == id }) }
+        // Process all workspaces (with or without columns), then free columns
+        for ws in allSortedWorkspaces {
+            // Align workspace left edge
+            ws.positionX = alignX - pad
 
-            let originX: Double
-            let originY: Double
-            let maxWidth: Double
-
-            if let ws = ws {
-                let pad = Workspace.padding
-                originX = ws.positionX + pad
-                // Stable origin from current workspace position
-                let stableY = ws.positionY + pad + 28 - 50
-                if sortedWorkspaces.count > 1 && nextGroupY > 0 && nextGroupY > ws.positionY {
-                    // Multiple workspaces: reposition to stack below previous group
-                    ws.positionY = nextGroupY
-                    originY = nextGroupY + pad + 28 - 50
-                } else {
-                    originY = stableY
-                }
-                maxWidth = ws.width - pad * 2
-            } else {
-                // Free columns: below all workspace groups
-                originX = 60
-                originY = max(0, nextGroupY > 0 ? nextGroupY - 200 : 0)
-                maxWidth = .infinity
+            // Always stack vertically from top
+            if nextGroupY > 0 {
+                ws.positionY = nextGroupY
             }
+
+            let groupCols = groups[ws.id] ?? []
+
+            if groupCols.isEmpty {
+                // Empty workspace: just track its bottom for stacking
+                nextGroupY = ws.positionY + ws.height + groupGap
+                continue
+            }
+
+            let originX = alignX
+            let originY = ws.positionY + pad + 28 - 50
+            // Don't constrain wrapping by current width — arrange freely, then fit
+            let maxWidth: Double = .infinity
 
             let groupIDs = Set(groupCols.map(\.id))
             let colMap = Dictionary(uniqueKeysWithValues: groupCols.map { ($0.id, $0) })
@@ -212,19 +205,94 @@ final class BoardViewModel {
             }
 
             // Fit workspace exactly to arranged columns (shrink + grow)
-            if let ws = ws {
-                var estimatedFrames: [UUID: CGRect] = [:]
-                for col in groupCols {
-                    let cx = col.positionX + 160
-                    let cy = col.positionY + 200
-                    estimatedFrames[col.id] = CGRect(x: cx - 160, y: cy - 150, width: 320, height: 300)
+            var estimatedFrames: [UUID: CGRect] = [:]
+            for col in groupCols {
+                let cx = col.positionX + 160
+                let cy = col.positionY + 200
+                estimatedFrames[col.id] = CGRect(x: cx - 160, y: cy - 150, width: 320, height: 300)
+            }
+            ws.fitToColumns(columnFrames: estimatedFrames)
+            nextGroupY = ws.positionY + ws.height + groupGap
+        }
+
+        // Free columns (no workspace): arrange below all workspaces, left-aligned
+        if let freeCols = groups[nil], !freeCols.isEmpty {
+            let freeOriginX = alignX
+            let freeOriginY = max(0, nextGroupY > 0 ? nextGroupY - 200 : 0)
+
+            let groupIDs = Set(freeCols.map(\.id))
+            let colMap = Dictionary(uniqueKeysWithValues: freeCols.map { ($0.id, $0) })
+            let validConns = connections.filter { groupIDs.contains($0.fromColumnID) && groupIDs.contains($0.toColumnID) }
+
+            var children: [UUID: [UUID]] = [:]
+            var inDegree: [UUID: Int] = [:]
+            for col in freeCols {
+                children[col.id] = []
+                inDegree[col.id] = 0
+            }
+            for conn in validConns {
+                children[conn.fromColumnID, default: []].append(conn.toColumnID)
+                inDegree[conn.toColumnID, default: 0] += 1
+            }
+
+            let connectedIDs = Set(validConns.flatMap { [$0.fromColumnID, $0.toColumnID] })
+            let isolated = freeCols.filter { !connectedIDs.contains($0.id) }.sorted { $0.order < $1.order }
+
+            if validConns.isEmpty {
+                let perRow = max(freeCols.count, 1)
+                for (i, col) in freeCols.sorted(by: { $0.order < $1.order }).enumerated() {
+                    col.positionX = freeOriginX + Double(i % perRow) * spacingX
+                    col.positionY = freeOriginY + Double(i / perRow) * spacingY
+                    col.order = i
                 }
-                ws.fitToColumns(columnFrames: estimatedFrames)
-                nextGroupY = ws.positionY + ws.height + groupGap
             } else {
-                // Track bottom of free columns for potential future use
-                let maxY = groupCols.map { $0.positionY + 200 + 150 }.max() ?? 0
-                nextGroupY = maxY + groupGap
+                var positions: [UUID: CGPoint] = [:]
+                var nextYSlot: Double = freeOriginY
+                var visited = Set<UUID>()
+
+                let roots = freeCols
+                    .filter { connectedIDs.contains($0.id) && inDegree[$0.id] == 0 }
+                    .sorted { $0.order < $1.order }
+
+                func layoutNode(_ id: UUID, depth: Int) {
+                    guard !visited.contains(id) else { return }
+                    visited.insert(id)
+                    let childIDs = (children[id] ?? []).sorted { (colMap[$0]?.order ?? 0) < (colMap[$1]?.order ?? 0) }
+                    let unvisited = childIDs.filter { !visited.contains($0) }
+                    if unvisited.isEmpty {
+                        positions[id] = CGPoint(x: freeOriginX + Double(depth) * spacingX, y: nextYSlot)
+                        nextYSlot += spacingY
+                    } else {
+                        for childID in unvisited { layoutNode(childID, depth: depth + 1) }
+                        let firstY = positions[unvisited.first!].map { Double($0.y) } ?? nextYSlot
+                        let lastY = positions[unvisited.last!].map { Double($0.y) } ?? nextYSlot
+                        positions[id] = CGPoint(x: freeOriginX + Double(depth) * spacingX, y: (firstY + lastY) / 2)
+                    }
+                }
+
+                for root in roots { layoutNode(root.id, depth: 0) }
+
+                for col in freeCols where connectedIDs.contains(col.id) && !visited.contains(col.id) {
+                    positions[col.id] = CGPoint(x: freeOriginX, y: nextYSlot)
+                    nextYSlot += spacingY
+                }
+
+                let maxTreeY = positions.values.map { Double($0.y) }.max() ?? freeOriginY
+                let isolatedY = maxTreeY + spacingY
+                let perRow = max(isolated.count, 1)
+                for (i, col) in isolated.enumerated() {
+                    positions[col.id] = CGPoint(x: freeOriginX + Double(i % perRow) * spacingX, y: isolatedY + Double(i / perRow) * spacingY)
+                }
+
+                let sorted = freeCols.sorted {
+                    let pa = positions[$0.id] ?? .zero; let pb = positions[$1.id] ?? .zero
+                    return pa.x != pb.x ? pa.x < pb.x : pa.y < pb.y
+                }
+                for (i, col) in sorted.enumerated() {
+                    col.positionX = positions[col.id].map { Double($0.x) } ?? freeOriginX
+                    col.positionY = positions[col.id].map { Double($0.y) } ?? freeOriginY
+                    col.order = i
+                }
             }
         }
     }
