@@ -151,7 +151,7 @@ struct WorkspaceView: View {
             .contentShape(Rectangle())
             .position(x: x, y: y)
             .gesture(
-                DragGesture(minimumDistance: 1)
+                DragGesture(minimumDistance: 1, coordinateSpace: .named("canvas"))
                     .onChanged { value in
                         if resizeEdge == nil {
                             resizeEdge = edge
@@ -159,7 +159,9 @@ struct WorkspaceView: View {
                             resizeOrigin = CGPoint(x: workspace.positionX, y: workspace.positionY)
                             resizeSize = CGSize(width: workspace.width, height: workspace.height)
                         }
-                        applyResize(edge: edge, translation: value.translation)
+                        let dx = value.location.x - resizeStart.x
+                        let dy = value.location.y - resizeStart.y
+                        applyResize(edge: edge, translation: CGSize(width: dx, height: dy))
                     }
                     .onEnded { _ in
                         resizeEdge = nil

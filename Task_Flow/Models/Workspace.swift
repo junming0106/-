@@ -16,6 +16,8 @@ final class Workspace {
     @Relationship(deleteRule: .nullify, inverse: \BoardColumn.workspace)
     var columns: [BoardColumn]
 
+    var board: Board?
+
     static let defaultWidth: Double = 400
     static let defaultHeight: Double = 300
     static let padding: Double = 40
@@ -40,35 +42,96 @@ final class Workspace {
         self.columns = []
     }
 
-    /// Fit workspace bounds to encompass given column frames with padding
+    /// Expand workspace bounds only on edges where columns exceed current bounds.
+    /// Never shrinks — only grows the specific edge that overflows.
+    func expandToFitColumns(columnFrames: [UUID: CGRect]) {
+        let cols = columns
+        guard !cols.isEmpty else { return }
+
+        let pad = Workspace.padding
+        let titleSpace: Double = 28
+
+        let frames = cols.compactMap { columnFrames[$0.id] }
+        let needsLeft: Double
+        let needsRight: Double
+        let needsTop: Double
+        let needsBottom: Double
+
+        if frames.count == cols.count {
+            needsLeft = frames.map { $0.minX }.min()! - pad
+            needsRight = frames.map { $0.maxX }.max()! + pad
+            needsTop = frames.map { $0.minY }.min()! - pad - titleSpace
+            needsBottom = frames.map { $0.maxY }.max()! + pad
+        } else {
+            // Fallback: estimate from stored positions
+            needsLeft = cols.map { $0.positionX }.min()! - pad
+            needsRight = cols.map { $0.positionX + 320 }.max()! + pad
+            needsTop = cols.map { $0.positionY + 200 - 150 }.min()! - pad - titleSpace
+            needsBottom = cols.map { $0.positionY + 200 + 150 }.max()! + pad
+        }
+
+        let currentRight = positionX + width
+        let currentBottom = positionY + height
+
+        // Expand left edge (moves origin left, increases width)
+        if needsLeft < positionX {
+            let diff = positionX - needsLeft
+            positionX = needsLeft
+            width += diff
+        }
+
+        // Expand right edge (increases width only)
+        if needsRight > currentRight {
+            width += needsRight - currentRight
+        }
+
+        // Expand top edge (moves origin up, increases height)
+        if needsTop < positionY {
+            let diff = positionY - needsTop
+            positionY = needsTop
+            height += diff
+        }
+
+        // Expand bottom edge (increases height only)
+        if needsBottom > currentBottom {
+            height += needsBottom - currentBottom
+        }
+
+        // Enforce minimums
+        width = max(width, Workspace.minWidth)
+        height = max(height, Workspace.minHeight)
+    }
+
+    /// Reset workspace bounds to exactly fit columns (shrinks and grows as needed)
     func fitToColumns(columnFrames: [UUID: CGRect]) {
         let cols = columns
         guard !cols.isEmpty else { return }
 
-        let frames = cols.compactMap { columnFrames[$0.id] }
-        guard frames.count == cols.count else {
-            // Fallback: estimate from positions
-            let pad = Workspace.padding
-            let minX = cols.map { $0.positionX }.min()! - pad
-            let maxX = cols.map { $0.positionX + 320 }.max()! + pad
-            let minY = cols.map { $0.positionY + 200 - 150 }.min()! - pad - 28
-            let maxY = cols.map { $0.positionY + 200 + 150 }.max()! + pad
-            positionX = minX
-            positionY = minY
-            width = max(maxX - minX, Workspace.minWidth)
-            height = max(maxY - minY, Workspace.minHeight)
-            return
-        }
-
         let pad = Workspace.padding
         let titleSpace: Double = 28
-        let minX = frames.map { $0.minX }.min()! - pad
-        let maxX = frames.map { $0.maxX }.max()! + pad
-        let minY = frames.map { $0.minY }.min()! - pad - titleSpace
-        let maxY = frames.map { $0.maxY }.max()! + pad
-        positionX = minX
-        positionY = minY
-        width = max(maxX - minX, Workspace.minWidth)
-        height = max(maxY - minY, Workspace.minHeight)
+
+        let frames = cols.compactMap { columnFrames[$0.id] }
+
+        let left: Double
+        let right: Double
+        let top: Double
+        let bottom: Double
+
+        if frames.count == cols.count {
+            left = frames.map { $0.minX }.min()! - pad
+            right = frames.map { $0.maxX }.max()! + pad
+            top = frames.map { $0.minY }.min()! - pad - titleSpace
+            bottom = frames.map { $0.maxY }.max()! + pad
+        } else {
+            left = cols.map { $0.positionX }.min()! - pad
+            right = cols.map { $0.positionX + 320 }.max()! + pad
+            top = cols.map { $0.positionY + 200 - 150 }.min()! - pad - titleSpace
+            bottom = cols.map { $0.positionY + 200 + 150 }.max()! + pad
+        }
+
+        positionX = left
+        positionY = top
+        width = max(right - left, Workspace.minWidth)
+        height = max(bottom - top, Workspace.minHeight)
     }
 }

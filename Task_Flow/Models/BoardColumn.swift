@@ -16,6 +16,7 @@ final class BoardColumn {
     var tasks: [TaskItem]
 
     var workspace: Workspace?
+    var board: Board?
 
     init(
         title: String,

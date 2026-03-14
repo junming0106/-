@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 
 struct NewColumnView: View {
+    let board: Board
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \BoardColumn.order) private var columns: [BoardColumn]
@@ -262,6 +263,7 @@ struct NewColumnView: View {
                     wipLimit: wipLimit,
                     iconName: iconName
                 )
+                newColumn.board = board
                 modelContext.insert(newColumn)
                 dismiss()
             }) {

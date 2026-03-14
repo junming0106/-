@@ -14,11 +14,22 @@ struct ColumnFrameKey: PreferenceKey {
 
 struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \BoardColumn.order) private var columns: [BoardColumn]
+    @Query(sort: \BoardColumn.order) private var allColumns: [BoardColumn]
     @Query private var connections: [CardConnection]
-    @Query private var workspaces: [Workspace]
+    @Query private var allWorkspaces: [Workspace]
     @Bindable var viewModel: BoardViewModel
     @Binding var showAIAssistant: Bool
+    let board: Board
+
+    /// Columns belonging to the current board
+    private var columns: [BoardColumn] {
+        allColumns.filter { $0.board?.id == board.id }
+    }
+
+    /// Workspaces belonging to the current board
+    private var workspaces: [Workspace] {
+        allWorkspaces.filter { $0.board?.id == board.id }
+    }
 
     @State private var columnFrames: [UUID: CGRect] = [:]
     @State private var pendingDeleteConnection: CardConnection?
@@ -49,11 +60,7 @@ struct KanbanBoardView: View {
                 canvasContent
             }
             .clipped()
-            .onAppear {
-                if columns.isEmpty {
-                    viewModel.createDefaultColumns(context: modelContext)
-                }
-            }
+            .onAppear { }
             .sheet(isPresented: $viewModel.showingNewTaskSheet) {
                 if let column = viewModel.newTaskColumnTarget {
                     NewTaskView(column: column, viewModel: viewModel)
@@ -67,7 +74,8 @@ struct KanbanBoardView: View {
                     viewModel.createColumnAtPosition(
                         context: modelContext,
                         columns: columns,
-                        canvasOffset: totalOffset
+                        canvasOffset: totalOffset,
+                        board: board
                     )
                 }) {
                     Label("New Column Here", systemImage: "plus.rectangle.on.rectangle")
@@ -84,6 +92,7 @@ struct KanbanBoardView: View {
                         positionY: canvasY - Workspace.defaultHeight / 2,
                         order: workspaces.count
                     )
+                    ws.board = board
                     modelContext.insert(ws)
                     viewModel.newColumnPosition = nil
                 }) {
@@ -92,7 +101,7 @@ struct KanbanBoardView: View {
 
                 Button(action: {
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-                        viewModel.autoArrangeColumns(columns, connections: connections)
+                        viewModel.autoArrangeColumns(columns, connections: connections, workspaces: workspaces)
                     }
                 }) {
                     Label("Auto Arrange", systemImage: "rectangle.3.group")
@@ -149,7 +158,7 @@ struct KanbanBoardView: View {
             }
         }
         .sheet(isPresented: $viewModel.showingNewColumnSheet) {
-            NewColumnView()
+            NewColumnView(board: board)
         }
     }
 
@@ -326,15 +335,30 @@ struct KanbanBoardView: View {
             colCenter = CGPoint(x: column.positionX + 160, y: column.positionY + 200)
         }
 
+        // If column is already in a workspace, check if it's fully outside → detach
+        if let currentWs = column.workspace {
+            let colFrame: CGRect
+            if let frame = columnFrames[column.id] {
+                colFrame = frame
+            } else {
+                colFrame = CGRect(x: column.positionX, y: column.positionY + 50, width: 320, height: 300)
+            }
+            let wsRect = workspaceBounds(currentWs)
+            // Detach if no overlap at all
+            if !wsRect.intersects(colFrame) {
+                column.workspace = nil
+            } else {
+                currentWs.expandToFitColumns(columnFrames: columnFrames)
+            }
+            return
+        }
+
         // Check all workspaces — assign to first matching, detach if outside all
         for ws in workspaces {
             let rect = workspaceBounds(ws)
             if rect.contains(colCenter) {
-                if column.workspace?.id != ws.id {
-                    column.workspace = ws
-                    // Fit workspace to include the new column
-                    ws.fitToColumns(columnFrames: columnFrames)
-                }
+                column.workspace = ws
+                ws.expandToFitColumns(columnFrames: columnFrames)
                 return
             }
         }

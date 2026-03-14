@@ -25,14 +25,26 @@ final class BoardViewModel {
     // New column spawn position (from right-click)
     var newColumnPosition: CGPoint?
 
-    func createDefaultColumns(context: ModelContext) {
+    func createDefaultColumns(context: ModelContext, board: Board) {
         let defaults: [(String, String, String, Int, Double, Double)] = [
-            ("Backlog", "tray.full", "purple", 0, 0, 40),
-            ("To Do", "checklist.unchecked", "blue", 1, 400, 40),
-            ("In Progress", "hammer", "orange", 2, 800, 40),
-            ("Review", "eye", "teal", 3, 1200, 40),
-            ("Done", "checkmark.circle", "green", 4, 1600, 40),
+            ("Backlog", "tray.full", "purple", 0, 0, 0),
+            ("To Do", "checklist.unchecked", "blue", 1, 400, 0),
+            ("In Progress", "hammer", "orange", 2, 800, 0),
+            ("Review", "eye", "teal", 3, 1200, 0),
+            ("Done", "checkmark.circle", "green", 4, 1600, 0),
         ]
+
+        // Create a workspace to group all default columns
+        let ws = Workspace(
+            name: "Work Status",
+            positionX: -Workspace.padding,
+            positionY: -Workspace.padding - 28,
+            width: Double(defaults.count) * 400 + Workspace.padding * 2,
+            height: 300 + Workspace.padding * 2 + 28,
+            order: 0
+        )
+        ws.board = board
+        context.insert(ws)
 
         for (title, icon, color, order, x, y) in defaults {
             let column = BoardColumn(
@@ -40,11 +52,13 @@ final class BoardViewModel {
                 colorName: color, iconName: icon,
                 positionX: x, positionY: y
             )
+            column.board = board
+            column.workspace = ws
             context.insert(column)
         }
     }
 
-    func createColumnAtPosition(context: ModelContext, columns: [BoardColumn], canvasOffset: CGSize) {
+    func createColumnAtPosition(context: ModelContext, columns: [BoardColumn], canvasOffset: CGSize, board: Board) {
         let order = columns.count
 
         let pos = newColumnPosition ?? CGPoint(x: 40, y: Double(order) * 280)
@@ -57,115 +71,161 @@ final class BoardViewModel {
             positionX: canvasX,
             positionY: canvasY
         )
+        column.board = board
         context.insert(column)
         newColumnPosition = nil
     }
 
-    func autoArrangeColumns(_ columns: [BoardColumn], connections: [CardConnection]) {
+    func autoArrangeColumns(_ columns: [BoardColumn], connections: [CardConnection], workspaces: [Workspace]) {
         guard !columns.isEmpty else { return }
 
         let spacingX: Double = 400
         let spacingY: Double = 300
-        let originX: Double = 60
-        let originY: Double = 60
+        let colWidth: Double = 320
+        let groupGap: Double = 120  // vertical gap between workspace groups
 
-        let ids = Set(columns.map(\.id))
-        let colMap = Dictionary(uniqueKeysWithValues: columns.map { ($0.id, $0) })
-
-        // Filter valid connections within this board
-        let validConns = connections.filter { ids.contains($0.fromColumnID) && ids.contains($0.toColumnID) }
-
-        // Build adjacency (parent → children) and inDegree
-        var children: [UUID: [UUID]] = [:]
-        var inDegree: [UUID: Int] = [:]
+        // Group columns by workspace (nil = free on canvas)
+        var groups: [UUID?: [BoardColumn]] = [:]
         for col in columns {
-            children[col.id] = []
-            inDegree[col.id] = 0
-        }
-        for conn in validConns {
-            children[conn.fromColumnID, default: []].append(conn.toColumnID)
-            inDegree[conn.toColumnID, default: 0] += 1
+            groups[col.workspace?.id, default: []].append(col)
         }
 
-        // Columns that participate in at least one connection
-        let connectedIDs = Set(validConns.flatMap { [$0.fromColumnID, $0.toColumnID] })
-        let isolated = columns.filter { !connectedIDs.contains($0.id) }
+        // Sort workspace groups by order, free columns last
+        let sortedWorkspaces = workspaces
+            .filter { groups[$0.id] != nil }
             .sorted { $0.order < $1.order }
 
-        // No connections → all columns in a horizontal row (left to right)
-        if validConns.isEmpty {
-            for (i, col) in columns.sorted(by: { $0.order < $1.order }).enumerated() {
-                col.positionX = originX + Double(i) * spacingX
-                col.positionY = originY
-                col.order = i
-            }
-            return
-        }
+        // Track cumulative Y for stacking workspace groups vertically
+        var nextGroupY: Double = 0
 
-        // Roots = connected columns with no incoming edges
-        let roots = columns
-            .filter { connectedIDs.contains($0.id) && inDegree[$0.id] == 0 }
-            .sorted { $0.order < $1.order }
+        // Arrange workspace groups first, then free columns
+        var orderedKeys: [UUID?] = sortedWorkspaces.map { $0.id }
+        if groups[nil] != nil { orderedKeys.append(nil) }
 
-        // Tree layout via DFS: assign Y slots bottom-up so siblings are vertically stacked
-        // and parent is vertically centred between its first and last child.
-        var positions: [UUID: CGPoint] = [:]
-        var nextYSlot: Double = originY
-        var visited = Set<UUID>()
+        for wsID in orderedKeys {
+            guard let groupCols = groups[wsID] else { continue }
+            let ws = wsID.flatMap { id in workspaces.first(where: { $0.id == id }) }
 
-        func layoutNode(_ id: UUID, depth: Int) {
-            guard !visited.contains(id) else { return }
-            visited.insert(id)
+            let originX: Double
+            let originY: Double
+            let maxWidth: Double
 
-            let childIDs = (children[id] ?? []).sorted {
-                (colMap[$0]?.order ?? 0) < (colMap[$1]?.order ?? 0)
-            }
-
-            // Only consider children not yet placed by another parent's subtree
-            let unvisitedChildren = childIDs.filter { !visited.contains($0) }
-
-            if unvisitedChildren.isEmpty {
-                // Leaf or all children already placed → claim own Y slot
-                positions[id] = CGPoint(x: originX + Double(depth) * spacingX, y: nextYSlot)
-                nextYSlot += spacingY
-            } else {
-                // Recurse into unvisited children first
-                for childID in unvisitedChildren {
-                    layoutNode(childID, depth: depth + 1)
+            if let ws = ws {
+                let pad = Workspace.padding
+                originX = ws.positionX + pad
+                // Stable origin from current workspace position
+                let stableY = ws.positionY + pad + 28 - 50
+                if sortedWorkspaces.count > 1 && nextGroupY > 0 && nextGroupY > ws.positionY {
+                    // Multiple workspaces: reposition to stack below previous group
+                    ws.positionY = nextGroupY
+                    originY = nextGroupY + pad + 28 - 50
+                } else {
+                    originY = stableY
                 }
-                // Centre this node between its first and last newly-placed child
-                let firstY = positions[unvisitedChildren.first!].map { Double($0.y) } ?? nextYSlot
-                let lastY  = positions[unvisitedChildren.last!].map { Double($0.y) } ?? nextYSlot
-                positions[id] = CGPoint(x: originX + Double(depth) * spacingX, y: (firstY + lastY) / 2)
+                maxWidth = ws.width - pad * 2
+            } else {
+                // Free columns: below all workspace groups
+                originX = 60
+                originY = max(0, nextGroupY > 0 ? nextGroupY - 200 : 0)
+                maxWidth = .infinity
             }
-        }
 
-        for root in roots { layoutNode(root.id, depth: 0) }
+            let groupIDs = Set(groupCols.map(\.id))
+            let colMap = Dictionary(uniqueKeysWithValues: groupCols.map { ($0.id, $0) })
+            let validConns = connections.filter { groupIDs.contains($0.fromColumnID) && groupIDs.contains($0.toColumnID) }
 
-        // Any connected node not yet visited (cycle fallback) — place sequentially
-        for col in columns where connectedIDs.contains(col.id) && !visited.contains(col.id) {
-            positions[col.id] = CGPoint(x: originX, y: nextYSlot)
-            nextYSlot += spacingY
-        }
+            // Build adjacency
+            var children: [UUID: [UUID]] = [:]
+            var inDegree: [UUID: Int] = [:]
+            for col in groupCols {
+                children[col.id] = []
+                inDegree[col.id] = 0
+            }
+            for conn in validConns {
+                children[conn.fromColumnID, default: []].append(conn.toColumnID)
+                inDegree[conn.toColumnID, default: 0] += 1
+            }
 
-        // Isolated columns: horizontal row below the tree (left to right)
-        let maxTreeY = positions.values.map { Double($0.y) }.max() ?? originY
-        let isolatedY = maxTreeY + spacingY
+            let connectedIDs = Set(validConns.flatMap { [$0.fromColumnID, $0.toColumnID] })
+            let isolated = groupCols.filter { !connectedIDs.contains($0.id) }.sorted { $0.order < $1.order }
 
-        for (i, col) in isolated.enumerated() {
-            positions[col.id] = CGPoint(x: originX + Double(i) * spacingX, y: isolatedY)
-        }
+            // No connections → grid layout with wrapping
+            if validConns.isEmpty {
+                let perRow = maxWidth.isInfinite ? groupCols.count : max(1, 1 + Int((maxWidth - colWidth) / spacingX))
+                for (i, col) in groupCols.sorted(by: { $0.order < $1.order }).enumerated() {
+                    col.positionX = originX + Double(i % perRow) * spacingX
+                    col.positionY = originY + Double(i / perRow) * spacingY
+                    col.order = i
+                }
+            } else {
+                // Tree layout via DFS
+                var positions: [UUID: CGPoint] = [:]
+                var nextYSlot: Double = originY
+                var visited = Set<UUID>()
 
-        // Write back positions and order
-        let allSorted = columns.sorted {
-            let pa = positions[$0.id] ?? .zero
-            let pb = positions[$1.id] ?? .zero
-            return pa.x != pb.x ? pa.x < pb.x : pa.y < pb.y
-        }
-        for (i, col) in allSorted.enumerated() {
-            col.positionX = positions[col.id].map { Double($0.x) } ?? originX
-            col.positionY = positions[col.id].map { Double($0.y) } ?? originY
-            col.order = i
+                let roots = groupCols
+                    .filter { connectedIDs.contains($0.id) && inDegree[$0.id] == 0 }
+                    .sorted { $0.order < $1.order }
+
+                func layoutNode(_ id: UUID, depth: Int) {
+                    guard !visited.contains(id) else { return }
+                    visited.insert(id)
+                    let childIDs = (children[id] ?? []).sorted { (colMap[$0]?.order ?? 0) < (colMap[$1]?.order ?? 0) }
+                    let unvisited = childIDs.filter { !visited.contains($0) }
+                    if unvisited.isEmpty {
+                        positions[id] = CGPoint(x: originX + Double(depth) * spacingX, y: nextYSlot)
+                        nextYSlot += spacingY
+                    } else {
+                        for childID in unvisited { layoutNode(childID, depth: depth + 1) }
+                        let firstY = positions[unvisited.first!].map { Double($0.y) } ?? nextYSlot
+                        let lastY = positions[unvisited.last!].map { Double($0.y) } ?? nextYSlot
+                        positions[id] = CGPoint(x: originX + Double(depth) * spacingX, y: (firstY + lastY) / 2)
+                    }
+                }
+
+                for root in roots { layoutNode(root.id, depth: 0) }
+
+                // Cycle fallback
+                for col in groupCols where connectedIDs.contains(col.id) && !visited.contains(col.id) {
+                    positions[col.id] = CGPoint(x: originX, y: nextYSlot)
+                    nextYSlot += spacingY
+                }
+
+                // Isolated: grid below tree with wrapping
+                let maxTreeY = positions.values.map { Double($0.y) }.max() ?? originY
+                let isolatedY = maxTreeY + spacingY
+                let perRow = maxWidth.isInfinite ? max(isolated.count, 1) : max(1, 1 + Int((maxWidth - colWidth) / spacingX))
+                for (i, col) in isolated.enumerated() {
+                    positions[col.id] = CGPoint(x: originX + Double(i % perRow) * spacingX, y: isolatedY + Double(i / perRow) * spacingY)
+                }
+
+                // Write back
+                let sorted = groupCols.sorted {
+                    let pa = positions[$0.id] ?? .zero; let pb = positions[$1.id] ?? .zero
+                    return pa.x != pb.x ? pa.x < pb.x : pa.y < pb.y
+                }
+                for (i, col) in sorted.enumerated() {
+                    col.positionX = positions[col.id].map { Double($0.x) } ?? originX
+                    col.positionY = positions[col.id].map { Double($0.y) } ?? originY
+                    col.order = i
+                }
+            }
+
+            // Fit workspace exactly to arranged columns (shrink + grow)
+            if let ws = ws {
+                var estimatedFrames: [UUID: CGRect] = [:]
+                for col in groupCols {
+                    let cx = col.positionX + 160
+                    let cy = col.positionY + 200
+                    estimatedFrames[col.id] = CGRect(x: cx - 160, y: cy - 150, width: 320, height: 300)
+                }
+                ws.fitToColumns(columnFrames: estimatedFrames)
+                nextGroupY = ws.positionY + ws.height + groupGap
+            } else {
+                // Track bottom of free columns for potential future use
+                let maxY = groupCols.map { $0.positionY + 200 + 150 }.max() ?? 0
+                nextGroupY = maxY + groupGap
+            }
         }
     }
 
