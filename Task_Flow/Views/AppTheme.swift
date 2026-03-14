@@ -18,10 +18,10 @@ enum AppTheme {
     }
 
     enum Radius {
-        static let card: CGFloat = 12
-        static let column: CGFloat = 16
+        static let card: CGFloat = 10
+        static let column: CGFloat = 14
         static let tag: CGFloat = 6
-        static let button: CGFloat = 10
+        static let button: CGFloat = 8
     }
 
     enum Shadow {

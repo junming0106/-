@@ -15,6 +15,8 @@ final class BoardColumn {
     @Relationship(deleteRule: .cascade, inverse: \TaskItem.column)
     var tasks: [TaskItem]
 
+    var workspace: Workspace?
+
     init(
         title: String,
         order: Int,

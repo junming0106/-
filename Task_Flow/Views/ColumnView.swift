@@ -11,6 +11,9 @@ struct ColumnView: View {
     @State private var isTargeted = false
     @State private var isEditingTitle = false
     @State private var isEditingIcon = false
+    @State private var isEditingColor = false
+    @FocusState private var isTitleFieldFocused: Bool
+    @State private var clickMonitor: Any?
 
     private let iconOptions = [
         "list.bullet", "tray.full", "checklist.unchecked",
@@ -44,13 +47,16 @@ struct ColumnView: View {
                         onSelect: { viewModel.selectedTask = task },
                         onDelete: { viewModel.deleteTask(task, context: modelContext) }
                     )
+                    .draggable(task.id.uuidString) {
+                        TaskCardDragPreview(task: task)
+                    }
                 }
 
                 AddTaskInlineButton { onAddTask(column) }
             }
             .padding(AppTheme.Spacing.columnPadding)
         }
-        .frame(width: 300)
+        .frame(width: 320)
         .liquidGlass(tint: columnColor.opacity(0.3))
         .overlay(alignment: .topTrailing) {
             Text("\(column.tasks.count)")
@@ -102,15 +108,13 @@ struct ColumnView: View {
             RoundedRectangle(cornerRadius: AppTheme.Radius.column, style: .continuous)
                 .stroke(Color.orange.opacity(0.6), lineWidth: 2.5)
                 .overlay(
-                    Text("Tap to connect")
-                        .font(.subheadline)
-                        .fontWeight(.medium)
+                    Image(systemName: "bolt.circle.fill")
+                        .font(.title)
+                        .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(.orange)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Color.orange.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .offset(y: -16),
+                        .padding(4)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .offset(y: -18),
                     alignment: .top
                 )
                 .onTapGesture {
@@ -136,34 +140,57 @@ struct ColumnView: View {
 
     private var columnHeader: some View {
         HStack(spacing: 10) {
+            // Color dot — tap to change column color
+            Button(action: { isEditingColor.toggle() }) {
+                Circle()
+                    .fill(columnColor)
+                    .frame(width: 12, height: 12)
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $isEditingColor) {
+                columnColorPicker
+            }
+
             // Tappable icon — opens icon picker
             Button(action: { isEditingIcon.toggle() }) {
                 Image(systemName: column.iconName)
                     .foregroundStyle(columnColor)
-                    .font(.title2)
+                    .font(.system(size: 18))
                     .fontWeight(.medium)
-                    .frame(width: 32, height: 32)
+                    .frame(width: 24, height: 24)
             }
             .buttonStyle(.plain)
             .popover(isPresented: $isEditingIcon) {
                 iconPicker
             }
 
-            // Tappable title — inline edit
+            // Tappable title — inline edit (click outside or Enter to finish)
             if isEditingTitle {
                 TextField("Name", text: $column.title)
-                    .font(.body)
-                    .fontWeight(.semibold)
+                    .font(.system(size: 16, weight: .semibold))
                     .textFieldStyle(.plain)
-                    .onSubmit { isEditingTitle = false }
-                    .onExitCommand { isEditingTitle = false }
+                    .focused($isTitleFieldFocused)
+                    .onSubmit { finishEditingTitle() }
+                    .onExitCommand { finishEditingTitle() }
+                    .onAppear {
+                        isTitleFieldFocused = true
+                        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
+                            // Check if click is outside the text field
+                            DispatchQueue.main.async { finishEditingTitle() }
+                            return event
+                        }
+                    }
+                    .onDisappear {
+                        removeClickMonitor()
+                    }
             } else {
-                Text(column.title)
-                    .font(.body)
-                    .fontWeight(.semibold)
+                Text(column.title.isEmpty ? "Untitled" : column.title)
+                    .font(.system(size: 16, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .foregroundStyle(.primary.opacity(0.85))
+                    .foregroundStyle(column.title.isEmpty ? Color.secondary.opacity(0.4) : Color.primary.opacity(0.85))
+                    .frame(minWidth: 60, alignment: .leading)
+                    .contentShape(Rectangle())
                     .onTapGesture { isEditingTitle = true }
             }
 
@@ -179,39 +206,28 @@ struct ColumnView: View {
             HeaderButton(
                 icon: "point.topleft.down.to.point.bottomright.curvepath",
                 tint: .orange,
-                size: .title2
+                size: .system(size: 16)
             ) {
                 viewModel.startConnecting(from: column)
             }
             .help("Connect to another column")
 
-            // Add task
-            HeaderButton(icon: "plus.circle.fill", tint: AppTheme.Colors.addButtonTint, size: .title2) {
-                onAddTask(column)
+            // Delete column
+            HeaderButton(icon: "xmark.circle.fill", tint: Color.secondary.opacity(0.5), size: .system(size: 18)) {
+                viewModel.deleteColumn(column, context: modelContext)
             }
-            .help("Add Task")
-
-            // Edit column
-            HeaderButton(icon: "pencil.circle.fill", tint: Color.secondary.opacity(0.6), size: .title2) {
-                isEditingTitle = true
-            }
-            .help("Edit Column")
-
-            Menu {
-                Button("Delete Column", role: .destructive) {
-                    viewModel.deleteColumn(column, context: modelContext)
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle.fill")
-                    .font(.title2)
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(Color.secondary.opacity(0.4))
-            }
-            .buttonStyle(.plain)
+            .help("Delete Column")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
         .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering {
+                NSCursor.openHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
     }
 
     // MARK: - Icon Picker Popover
@@ -243,6 +259,64 @@ struct ColumnView: View {
         }
         .padding(14)
         .frame(width: 280)
+    }
+
+    // MARK: - Title Editing
+
+    private func finishEditingTitle() {
+        guard isEditingTitle else { return }
+        isEditingTitle = false
+        isTitleFieldFocused = false
+        removeClickMonitor()
+    }
+
+    private func removeClickMonitor() {
+        if let monitor = clickMonitor {
+            NSEvent.removeMonitor(monitor)
+            clickMonitor = nil
+        }
+    }
+
+    // MARK: - Column Color Picker
+
+    private var columnColorPicker: some View {
+        VStack(spacing: 10) {
+            Text("Column Color")
+                .font(.subheadline)
+                .fontWeight(.semibold)
+
+            HStack(spacing: 8) {
+                ForEach(ColorOption.allCases, id: \.self) { color in
+                    let displayColor: Color = {
+                        switch color {
+                        case .blue: return .blue
+                        case .purple: return .purple
+                        case .green: return .green
+                        case .orange: return .orange
+                        case .red: return .red
+                        case .pink: return .pink
+                        case .teal: return .teal
+                        case .indigo: return .indigo
+                        }
+                    }()
+
+                    Button(action: {
+                        column.colorName = color.rawValue
+                    }) {
+                        Circle()
+                            .fill(displayColor)
+                            .frame(width: 24, height: 24)
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white, lineWidth: column.colorName == color.rawValue ? 2.5 : 0)
+                            )
+                            .scaleEffect(column.colorName == color.rawValue ? 1.15 : 1.0)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(14)
     }
 
     private var columnColor: Color {
@@ -289,17 +363,15 @@ struct AddTaskInlineButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Image(systemName: "plus")
-                    .font(.body)
-                    .fontWeight(.medium)
+                    .font(.system(size: 14, weight: .semibold))
                 Text("New Task")
-                    .font(.body)
-                    .fontWeight(.medium)
+                    .font(.system(size: 14, weight: .semibold))
             }
             .foregroundStyle(isHovering ? Color.accentColor : Color.secondary.opacity(0.5))
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
+            .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: AppTheme.Radius.button, style: .continuous)
                     .fill(isHovering ? Color.accentColor.opacity(0.06) : Color.primary.opacity(0.02))

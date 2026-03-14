@@ -18,16 +18,20 @@ final class BoardViewModel {
     var draggingColumnID: UUID?
     var columnDragOffset: CGSize = .zero
 
+    // Workspace drag state
+    var draggingWorkspaceID: UUID?
+    var workspaceDragOffset: CGSize = .zero
+
     // New column spawn position (from right-click)
     var newColumnPosition: CGPoint?
 
     func createDefaultColumns(context: ModelContext) {
         let defaults: [(String, String, String, Int, Double, Double)] = [
-            ("Backlog", "tray.full", "purple", 0, 40, 0),
-            ("To Do", "checklist.unchecked", "blue", 1, 40, 280),
-            ("In Progress", "hammer", "orange", 2, 40, 560),
-            ("Review", "eye", "teal", 3, 40, 840),
-            ("Done", "checkmark.circle", "green", 4, 40, 1120),
+            ("Backlog", "tray.full", "purple", 0, 0, 40),
+            ("To Do", "checklist.unchecked", "blue", 1, 400, 40),
+            ("In Progress", "hammer", "orange", 2, 800, 40),
+            ("Review", "eye", "teal", 3, 1200, 40),
+            ("Done", "checkmark.circle", "green", 4, 1600, 40),
         ]
 
         for (title, icon, color, order, x, y) in defaults {
@@ -42,18 +46,14 @@ final class BoardViewModel {
 
     func createColumnAtPosition(context: ModelContext, columns: [BoardColumn], canvasOffset: CGSize) {
         let order = columns.count
-        let colors = ColorOption.allCases
-        let color = colors[order % colors.count]
 
         let pos = newColumnPosition ?? CGPoint(x: 40, y: Double(order) * 280)
-        // Convert screen position to canvas position by removing canvas offset and column center offset
         let canvasX = pos.x - canvasOffset.width - 150
         let canvasY = pos.y - canvasOffset.height - 200
 
         let column = BoardColumn(
             title: "New Column",
             order: order,
-            colorName: color.rawValue,
             positionX: canvasX,
             positionY: canvasY
         )
@@ -62,60 +62,111 @@ final class BoardViewModel {
     }
 
     func autoArrangeColumns(_ columns: [BoardColumn], connections: [CardConnection]) {
-        let sorted = topologicalSort(columns: columns, connections: connections)
-        let spacingX: Double = 380
-        let spacingY: Double = 60
+        guard !columns.isEmpty else { return }
 
-        // Lay out in a horizontal flow following connection order
-        for (i, col) in sorted.enumerated() {
-            col.positionX = 40 + Double(i) * spacingX
-            col.positionY = spacingY
-            col.order = i
-        }
-    }
-
-    /// Topological sort: columns with no incoming edges first, following connection direction.
-    /// Falls back to original order for disconnected columns.
-    private func topologicalSort(columns: [BoardColumn], connections: [CardConnection]) -> [BoardColumn] {
-        guard !connections.isEmpty else {
-            return columns.sorted { $0.order < $1.order }
-        }
+        let spacingX: Double = 400
+        let spacingY: Double = 300
+        let originX: Double = 60
+        let originY: Double = 60
 
         let ids = Set(columns.map(\.id))
+        let colMap = Dictionary(uniqueKeysWithValues: columns.map { ($0.id, $0) })
+
+        // Filter valid connections within this board
+        let validConns = connections.filter { ids.contains($0.fromColumnID) && ids.contains($0.toColumnID) }
+
+        // Build adjacency (parent → children) and inDegree
+        var children: [UUID: [UUID]] = [:]
         var inDegree: [UUID: Int] = [:]
-        var adjacency: [UUID: [UUID]] = [:]
         for col in columns {
+            children[col.id] = []
             inDegree[col.id] = 0
-            adjacency[col.id] = []
         }
-        for conn in connections {
-            guard ids.contains(conn.fromColumnID), ids.contains(conn.toColumnID) else { continue }
-            adjacency[conn.fromColumnID, default: []].append(conn.toColumnID)
+        for conn in validConns {
+            children[conn.fromColumnID, default: []].append(conn.toColumnID)
             inDegree[conn.toColumnID, default: 0] += 1
         }
 
-        // Kahn's algorithm
-        var queue = columns.filter { inDegree[$0.id] == 0 }.sorted { $0.order < $1.order }
-        var result: [BoardColumn] = []
-        let colMap = Dictionary(uniqueKeysWithValues: columns.map { ($0.id, $0) })
+        // Columns that participate in at least one connection
+        let connectedIDs = Set(validConns.flatMap { [$0.fromColumnID, $0.toColumnID] })
+        let isolated = columns.filter { !connectedIDs.contains($0.id) }
+            .sorted { $0.order < $1.order }
 
-        while !queue.isEmpty {
-            let col = queue.removeFirst()
-            result.append(col)
-            for nextID in adjacency[col.id] ?? [] {
-                inDegree[nextID, default: 1] -= 1
-                if inDegree[nextID] == 0, let next = colMap[nextID] {
-                    queue.append(next)
+        // No connections → all columns in a horizontal row (left to right)
+        if validConns.isEmpty {
+            for (i, col) in columns.sorted(by: { $0.order < $1.order }).enumerated() {
+                col.positionX = originX + Double(i) * spacingX
+                col.positionY = originY
+                col.order = i
+            }
+            return
+        }
+
+        // Roots = connected columns with no incoming edges
+        let roots = columns
+            .filter { connectedIDs.contains($0.id) && inDegree[$0.id] == 0 }
+            .sorted { $0.order < $1.order }
+
+        // Tree layout via DFS: assign Y slots bottom-up so siblings are vertically stacked
+        // and parent is vertically centred between its first and last child.
+        var positions: [UUID: CGPoint] = [:]
+        var nextYSlot: Double = originY
+        var visited = Set<UUID>()
+
+        func layoutNode(_ id: UUID, depth: Int) {
+            guard !visited.contains(id) else { return }
+            visited.insert(id)
+
+            let childIDs = (children[id] ?? []).sorted {
+                (colMap[$0]?.order ?? 0) < (colMap[$1]?.order ?? 0)
+            }
+
+            // Only consider children not yet placed by another parent's subtree
+            let unvisitedChildren = childIDs.filter { !visited.contains($0) }
+
+            if unvisitedChildren.isEmpty {
+                // Leaf or all children already placed → claim own Y slot
+                positions[id] = CGPoint(x: originX + Double(depth) * spacingX, y: nextYSlot)
+                nextYSlot += spacingY
+            } else {
+                // Recurse into unvisited children first
+                for childID in unvisitedChildren {
+                    layoutNode(childID, depth: depth + 1)
                 }
+                // Centre this node between its first and last newly-placed child
+                let firstY = positions[unvisitedChildren.first!].map { Double($0.y) } ?? nextYSlot
+                let lastY  = positions[unvisitedChildren.last!].map { Double($0.y) } ?? nextYSlot
+                positions[id] = CGPoint(x: originX + Double(depth) * spacingX, y: (firstY + lastY) / 2)
             }
         }
 
-        // Append any remaining (cycle or disconnected)
-        let resultIDs = Set(result.map(\.id))
-        let remaining = columns.filter { !resultIDs.contains($0.id) }.sorted { $0.order < $1.order }
-        result.append(contentsOf: remaining)
+        for root in roots { layoutNode(root.id, depth: 0) }
 
-        return result
+        // Any connected node not yet visited (cycle fallback) — place sequentially
+        for col in columns where connectedIDs.contains(col.id) && !visited.contains(col.id) {
+            positions[col.id] = CGPoint(x: originX, y: nextYSlot)
+            nextYSlot += spacingY
+        }
+
+        // Isolated columns: horizontal row below the tree (left to right)
+        let maxTreeY = positions.values.map { Double($0.y) }.max() ?? originY
+        let isolatedY = maxTreeY + spacingY
+
+        for (i, col) in isolated.enumerated() {
+            positions[col.id] = CGPoint(x: originX + Double(i) * spacingX, y: isolatedY)
+        }
+
+        // Write back positions and order
+        let allSorted = columns.sorted {
+            let pa = positions[$0.id] ?? .zero
+            let pb = positions[$1.id] ?? .zero
+            return pa.x != pb.x ? pa.x < pb.x : pa.y < pb.y
+        }
+        for (i, col) in allSorted.enumerated() {
+            col.positionX = positions[col.id].map { Double($0.x) } ?? originX
+            col.positionY = positions[col.id].map { Double($0.y) } ?? originY
+            col.order = i
+        }
     }
 
     func addTask(

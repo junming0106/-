@@ -9,6 +9,7 @@ struct Task_FlowApp: App {
             SubTask.self,
             BoardColumn.self,
             CardConnection.self,
+            Workspace.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
