@@ -8,6 +8,7 @@ struct ColumnView: View {
     let onAddTask: (BoardColumn) -> Void
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.undoManager) private var undoManager
     @State private var isTargeted = false
     @State private var isEditingTitle = false
     @State private var isEditingIcon = false
@@ -44,7 +45,7 @@ struct ColumnView: View {
                     TaskCardView(
                         task: task,
                         isSelected: viewModel.selectedTask?.id == task.id,
-                        onSelect: { viewModel.selectedTask = task },
+                        onSelect: { withAnimation(.easeInOut(duration: 0.2)) { viewModel.selectedTask = task } },
                         onDelete: { viewModel.deleteTask(task, context: modelContext) }
                     )
                     .draggable(task.id.uuidString) {
@@ -90,7 +91,7 @@ struct ColumnView: View {
                     predicate: #Predicate { $0.id == taskID }
                 )
                 guard let task = try? modelContext.fetch(descriptor).first else { return false }
-                viewModel.moveTask(task, to: column, at: column.tasks.count)
+                viewModel.moveTask(task, to: column, at: column.tasks.count, undoManager: undoManager)
                 return true
             }
         } isTargeted: { targeted in
@@ -123,7 +124,7 @@ struct ColumnView: View {
                 )
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    viewModel.finishConnecting(to: column, context: modelContext)
+                    viewModel.finishConnecting(to: column, board: column.board, context: modelContext)
                 }
         }
     }
@@ -219,7 +220,7 @@ struct ColumnView: View {
 
             // Delete column
             HeaderButton(icon: "xmark.circle.fill", tint: .red.opacity(0.6), size: .system(size: 22)) {
-                viewModel.deleteColumn(column, context: modelContext)
+                viewModel.deleteColumn(column, context: modelContext, undoManager: undoManager)
             }
             .help("Delete Column")
         }

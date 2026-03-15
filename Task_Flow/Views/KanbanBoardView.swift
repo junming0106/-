@@ -14,11 +14,11 @@ struct ColumnFrameKey: PreferenceKey {
 
 struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.undoManager) private var undoManager
     @Query(sort: \BoardColumn.order) private var allColumns: [BoardColumn]
     @Query private var connections: [CardConnection]
     @Query private var allWorkspaces: [Workspace]
     @Bindable var viewModel: BoardViewModel
-    @Binding var showAIAssistant: Bool
     let board: Board
 
     @AppStorage("showGridBackground") private var showGridBackground = true
@@ -41,10 +41,12 @@ struct KanbanBoardView: View {
 
     // Selection
     @State private var selectedColumnIDs: Set<UUID> = []
+    @State private var selectedWorkspaceIDs: Set<UUID> = []
     @State private var selectionRect: CGRect? = nil
     @State private var selectionStart: CGPoint = .zero
     @State private var isSelecting = false
     @State private var isShiftHeld = false
+    @State private var isPanning = false
 
     // Canvas pan
     @State private var currentPan: CGSize = .zero
@@ -76,12 +78,12 @@ struct KanbanBoardView: View {
                 }
             }
             .overlay {
-                // Transparent overlay that captures Shift+drag for selection
+                // Transparent overlay that captures Shift+drag for canvas panning
                 // Must sit on top of all child views to intercept their gestures
                 Color.clear
                     .contentShape(Rectangle())
-                    .allowsHitTesting(isShiftHeld || isSelecting)
-                    .gesture(selectionDragGesture)
+                    .allowsHitTesting(isShiftHeld || isPanning || isSpaceHeld)
+                    .gesture(canvasPanGesture)
             }
             .overlay {
                 // Selection rectangle visual (in screen space)
@@ -97,16 +99,17 @@ struct KanbanBoardView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .gesture(canvasPanGesture)
+            .gesture(selectionDragGesture)
             .gesture(canvasZoomGesture(in: geo))
             .onAppear { setupShiftMonitor() }
             .onDisappear { removeShiftMonitor() }
             .contextMenu {
-                if !selectedColumnIDs.isEmpty {
+                if hasSelection {
                     // Selection context menu
-                    let count = selectedColumnIDs.count
+                    let colCount = selectedColumnIDs.count
+                    let wsCount = selectedWorkspaceIDs.count
 
-                    Text("\(count) Columns Selected")
+                    Text("\(colCount) Columns, \(wsCount) Workspaces Selected")
                         .font(.headline)
 
                     Divider()
@@ -118,7 +121,7 @@ struct KanbanBoardView: View {
                                 Button(action: {
                                     withAnimation(.spring(response: 0.3)) {
                                         moveColumnsToWorkspace(selectedColumns, workspace: ws)
-                                        selectedColumnIDs.removeAll()
+                                        clearSelection()
                                     }
                                 }) {
                                     Label(ws.name.isEmpty ? "Untitled" : ws.name, systemImage: "rectangle.dashed")
@@ -143,7 +146,7 @@ struct KanbanBoardView: View {
                                 for col in selectedColumns {
                                     col.workspace = nil
                                 }
-                                selectedColumnIDs.removeAll()
+                                clearSelection()
                             }
                         }) {
                             Label("Remove from Workspace", systemImage: "rectangle.badge.minus")
@@ -155,12 +158,13 @@ struct KanbanBoardView: View {
                     // Select all
                     Button(action: {
                         selectedColumnIDs = Set(columns.map(\.id))
+                        selectedWorkspaceIDs = Set(workspaces.map(\.id))
                     }) {
                         Label("Select All", systemImage: "checkmark.rectangle.stack")
                     }
 
                     Button(action: {
-                        selectedColumnIDs.removeAll()
+                        clearSelection()
                     }) {
                         Label("Deselect All", systemImage: "xmark.rectangle")
                     }
@@ -171,12 +175,12 @@ struct KanbanBoardView: View {
                     Button(role: .destructive, action: {
                         withAnimation(.spring(response: 0.3)) {
                             for col in selectedColumns {
-                                viewModel.deleteColumn(col, context: modelContext)
+                                viewModel.deleteColumn(col, context: modelContext, undoManager: undoManager)
                             }
-                            selectedColumnIDs.removeAll()
+                            clearSelection()
                         }
                     }) {
-                        Label("Delete \(count) Columns", systemImage: "trash")
+                        Label("Delete \(colCount) Columns", systemImage: "trash")
                     }
                 } else {
                     // Normal canvas context menu
@@ -210,7 +214,7 @@ struct KanbanBoardView: View {
 
                     Button(action: {
                         withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-                            viewModel.autoArrangeColumns(columns, connections: connections, workspaces: workspaces)
+                            viewModel.autoArrangeColumns(columns, connections: connections, workspaces: workspaces, undoManager: undoManager)
                         }
                     }) {
                         Label("Auto Arrange", systemImage: "rectangle.3.group")
@@ -219,11 +223,9 @@ struct KanbanBoardView: View {
                     Divider()
 
                     Button(action: {
-                        withAnimation(.spring(response: 0.3)) {
-                            showAIAssistant.toggle()
-                        }
+                        QuickInputPanel.shared.toggle()
                     }) {
-                        Label(showAIAssistant ? "Hide AI Assistant" : "AI Assistant", systemImage: "sparkles")
+                        Label("AI Assistant (⌃⇧Space)", systemImage: "sparkles")
                     }
 
                     Divider()
@@ -265,9 +267,15 @@ struct KanbanBoardView: View {
                     viewModel.cancelConnecting()
                 }
                 pendingDeleteConnection = nil
-                if !selectedColumnIDs.isEmpty {
+                if hasSelection {
                     withAnimation(.easeInOut(duration: 0.15)) {
-                        selectedColumnIDs.removeAll()
+                        clearSelection()
+                    }
+                }
+                // Close task detail panel when clicking canvas background
+                if viewModel.selectedTask != nil {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        viewModel.selectedTask = nil
                     }
                 }
             }
@@ -284,9 +292,28 @@ struct KanbanBoardView: View {
             // Workspaces — bottommost layer, behind everything
             ForEach(workspaces) { ws in
                 let isWsDragging = viewModel.draggingWorkspaceID == ws.id
-                let wsOffset = isWsDragging ? viewModel.workspaceDragOffset : .zero
+                let isWsSelectedDragging = !isWsDragging
+                    && selectedWorkspaceIDs.contains(ws.id)
+                    && isSelectionDragActive
+                let wsOffset = isWsDragging ? viewModel.workspaceDragOffset
+                    : isWsSelectedDragging ? viewModel.columnDragOffset
+                    : .zero
 
                 WorkspaceView(workspace: ws, viewModel: viewModel, columnFrames: columnFrames)
+                    .overlay {
+                        if selectedWorkspaceIDs.contains(ws.id) {
+                            let rect = workspaceBounds(ws)
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(Color.blue.opacity(0.8), lineWidth: 2.5)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .fill(Color.blue.opacity(0.05))
+                                )
+                                .frame(width: rect.width, height: rect.height)
+                                .position(x: rect.midX, y: rect.midY)
+                                .allowsHitTesting(false)
+                        }
+                    }
                     .offset(wsOffset)
                     .gesture(workspaceDragGesture(for: ws))
                     .contextMenu {
@@ -316,7 +343,7 @@ struct KanbanBoardView: View {
                                     let ids = Set(wsCols.map(\.id))
                                     return ids.contains(conn.fromColumnID) && ids.contains(conn.toColumnID)
                                 }
-                                viewModel.autoArrangeColumns(wsCols, connections: Array(wsConns), workspaces: [ws])
+                                viewModel.autoArrangeColumns(wsCols, connections: Array(wsConns), workspaces: [ws], undoManager: undoManager)
                             }
                         }) {
                             Label("Auto Arrange", systemImage: "rectangle.3.group")
@@ -326,10 +353,12 @@ struct KanbanBoardView: View {
 
                         Button(role: .destructive, action: {
                             withAnimation(.spring(response: 0.3)) {
+                                undoManager?.beginUndoGrouping()
                                 for col in ws.columns {
                                     col.workspace = nil
                                 }
                                 modelContext.delete(ws)
+                                undoManager?.endUndoGrouping()
                             }
                         }) {
                             Label("Delete Workspace", systemImage: "trash")
@@ -360,10 +389,18 @@ struct KanbanBoardView: View {
             // Columns — free positioned, drag managed here
             ForEach(columns) { column in
                 let isDragging = viewModel.draggingColumnID == column.id
+                let isSelectedDragging = !isDragging
+                    && selectedColumnIDs.contains(column.id)
+                    && isSelectionDragActive
+                // Column follows if its parent workspace is selected and being dragged via selection
+                let isWsSelectedDragging = !isDragging && !isSelectedDragging
+                    && column.workspace != nil
+                    && selectedWorkspaceIDs.contains(column.workspace!.id)
+                    && isSelectionDragActive
                 let isWsDragging = column.workspace != nil && viewModel.draggingWorkspaceID == column.workspace?.id
-                let colOffset = isDragging ? viewModel.columnDragOffset : .zero
+                let selectionOffset = (isDragging || isSelectedDragging || isWsSelectedDragging) ? viewModel.columnDragOffset : .zero
                 let wsOffset = isWsDragging ? viewModel.workspaceDragOffset : .zero
-                let extraOffset = CGSize(width: colOffset.width + wsOffset.width, height: colOffset.height + wsOffset.height)
+                let extraOffset = CGSize(width: selectionOffset.width + wsOffset.width, height: selectionOffset.height + wsOffset.height)
 
                 ColumnView(
                     column: column,
@@ -383,8 +420,8 @@ struct KanbanBoardView: View {
                     }
                 )
                 .offset(extraOffset)
-                .zIndex(isDragging ? 100 : 0)
-                .shadow(color: isDragging ? .black.opacity(0.2) : .clear, radius: isDragging ? 12 : 0, y: isDragging ? 6 : 0)
+                .zIndex((isDragging || isSelectedDragging || isWsSelectedDragging) ? 100 : 0)
+                .shadow(color: (isDragging || isSelectedDragging || isWsSelectedDragging) ? .black.opacity(0.2) : .clear, radius: (isDragging || isSelectedDragging || isWsSelectedDragging) ? 12 : 0, y: (isDragging || isSelectedDragging || isWsSelectedDragging) ? 6 : 0)
                 .overlay {
                     if selectedColumnIDs.contains(column.id) {
                         RoundedRectangle(cornerRadius: AppTheme.Radius.column, style: .continuous)
@@ -408,8 +445,8 @@ struct KanbanBoardView: View {
                         } else {
                             selectedColumnIDs.insert(column.id)
                         }
-                    } else if !selectedColumnIDs.isEmpty {
-                        selectedColumnIDs.removeAll()
+                    } else if hasSelection {
+                        clearSelection()
                     }
                 }
                 .contextMenu {
@@ -428,7 +465,7 @@ struct KanbanBoardView: View {
                                     Button(action: {
                                         withAnimation(.spring(response: 0.3)) {
                                             moveColumnsToWorkspace(selectedColumns, workspace: ws)
-                                            selectedColumnIDs.removeAll()
+                                            clearSelection()
                                         }
                                     }) {
                                         Label(ws.name.isEmpty ? "Untitled" : ws.name, systemImage: "rectangle.dashed")
@@ -451,7 +488,7 @@ struct KanbanBoardView: View {
                                     for col in selectedColumns {
                                         col.workspace = nil
                                     }
-                                    selectedColumnIDs.removeAll()
+                                    clearSelection()
                                 }
                             }) {
                                 Label("Remove from Workspace", systemImage: "rectangle.badge.minus")
@@ -462,12 +499,13 @@ struct KanbanBoardView: View {
 
                         Button(action: {
                             selectedColumnIDs = Set(columns.map(\.id))
+                            selectedWorkspaceIDs = Set(workspaces.map(\.id))
                         }) {
                             Label("Select All", systemImage: "checkmark.rectangle.stack")
                         }
 
                         Button(action: {
-                            selectedColumnIDs.removeAll()
+                            clearSelection()
                         }) {
                             Label("Deselect All", systemImage: "xmark.rectangle")
                         }
@@ -477,9 +515,9 @@ struct KanbanBoardView: View {
                         Button(role: .destructive, action: {
                             withAnimation(.spring(response: 0.3)) {
                                 for col in selectedColumns {
-                                    viewModel.deleteColumn(col, context: modelContext)
+                                    viewModel.deleteColumn(col, context: modelContext, undoManager: undoManager)
                                 }
-                                selectedColumnIDs.removeAll()
+                                clearSelection()
                             }
                         }) {
                             Label("Delete \(count) Columns", systemImage: "trash")
@@ -535,7 +573,7 @@ struct KanbanBoardView: View {
 
                         Button(role: .destructive, action: {
                             withAnimation(.spring(response: 0.3)) {
-                                viewModel.deleteColumn(column, context: modelContext)
+                                viewModel.deleteColumn(column, context: modelContext, undoManager: undoManager)
                             }
                         }) {
                             Label("Delete Column", systemImage: "trash")
@@ -586,13 +624,46 @@ struct KanbanBoardView: View {
             }
             .onEnded { value in
                 NSCursor.pop()
-                column.positionX += value.translation.width
-                column.positionY += value.translation.height
+                let dx = value.translation.width
+                let dy = value.translation.height
+
+                if selectedColumnIDs.contains(column.id) {
+                    // Group multi-selection move as one undo step
+                    undoManager?.beginUndoGrouping()
+
+                    // Move all selected columns
+                    for col in selectedColumns {
+                        col.positionX += dx
+                        col.positionY += dy
+                    }
+
+                    // Move all selected workspaces and their contained columns
+                    let selectedWsList = workspaces.filter { selectedWorkspaceIDs.contains($0.id) }
+                    let alreadyMovedIDs = Set(selectedColumns.map(\.id))
+                    for ws in selectedWsList {
+                        ws.positionX += dx
+                        ws.positionY += dy
+                        // Move workspace's columns that weren't already moved as selected columns
+                        for col in ws.columns where !alreadyMovedIDs.contains(col.id) {
+                            col.positionX += dx
+                            col.positionY += dy
+                        }
+                    }
+
+                    // Auto-assign each moved column to workspace
+                    for col in selectedColumns {
+                        assignColumnToWorkspace(col)
+                    }
+
+                    undoManager?.endUndoGrouping()
+                } else {
+                    column.positionX += dx
+                    column.positionY += dy
+                    assignColumnToWorkspace(column)
+                }
+
                 viewModel.draggingColumnID = nil
                 viewModel.columnDragOffset = .zero
-
-                // Auto-assign column to workspace if dropped inside one
-                assignColumnToWorkspace(column)
             }
     }
 
@@ -601,29 +672,60 @@ struct KanbanBoardView: View {
     private func workspaceDragGesture(for ws: Workspace) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
-                if viewModel.draggingWorkspaceID == nil {
-                    NSCursor.closedHand.push()
+                if selectedWorkspaceIDs.contains(ws.id) && hasSelection {
+                    // Use column drag state so all selected items follow
+                    if viewModel.draggingColumnID == nil {
+                        NSCursor.closedHand.push()
+                        // Use a sentinel ID to indicate selection drag initiated from workspace
+                        viewModel.draggingColumnID = ws.id
+                    }
+                    viewModel.columnDragOffset = value.translation
+                } else {
+                    if viewModel.draggingWorkspaceID == nil {
+                        NSCursor.closedHand.push()
+                    }
+                    viewModel.draggingWorkspaceID = ws.id
+                    viewModel.workspaceDragOffset = value.translation
                 }
-                viewModel.draggingWorkspaceID = ws.id
-                viewModel.workspaceDragOffset = value.translation
             }
             .onEnded { value in
                 NSCursor.pop()
                 let dx = value.translation.width
                 let dy = value.translation.height
 
-                // Move workspace position
-                ws.positionX += dx
-                ws.positionY += dy
+                if selectedWorkspaceIDs.contains(ws.id) && hasSelection {
+                    // Move all selected columns
+                    for col in selectedColumns {
+                        col.positionX += dx
+                        col.positionY += dy
+                    }
 
-                // Move all contained columns together
-                for col in ws.columns {
-                    col.positionX += dx
-                    col.positionY += dy
+                    // Move all selected workspaces and their contained columns
+                    let selectedWsList = workspaces.filter { selectedWorkspaceIDs.contains($0.id) }
+                    let alreadyMovedIDs = Set(selectedColumns.map(\.id))
+                    for selWs in selectedWsList {
+                        selWs.positionX += dx
+                        selWs.positionY += dy
+                        for col in selWs.columns where !alreadyMovedIDs.contains(col.id) {
+                            col.positionX += dx
+                            col.positionY += dy
+                        }
+                    }
+
+                    viewModel.draggingColumnID = nil
+                    viewModel.columnDragOffset = .zero
+                } else {
+                    // Single workspace drag
+                    ws.positionX += dx
+                    ws.positionY += dy
+                    for col in ws.columns {
+                        col.positionX += dx
+                        col.positionY += dy
+                    }
+
+                    viewModel.draggingWorkspaceID = nil
+                    viewModel.workspaceDragOffset = .zero
                 }
-
-                viewModel.draggingWorkspaceID = nil
-                viewModel.workspaceDragOffset = .zero
             }
     }
 
@@ -713,8 +815,26 @@ struct KanbanBoardView: View {
         columns.filter { selectedColumnIDs.contains($0.id) }
     }
 
+    private var hasSelection: Bool {
+        !selectedColumnIDs.isEmpty || !selectedWorkspaceIDs.isEmpty
+    }
+
+    /// True when a selection-group drag is in progress (dragged item is part of selection)
+    private var isSelectionDragActive: Bool {
+        guard let dragID = viewModel.draggingColumnID else { return false }
+        return selectedColumnIDs.contains(dragID) || selectedWorkspaceIDs.contains(dragID)
+    }
+
+    private func clearSelection() {
+        selectedColumnIDs.removeAll()
+        selectedWorkspaceIDs.removeAll()
+    }
+
     /// Move columns into a workspace, repositioning them in a row inside the workspace
     private func moveColumnsToWorkspace(_ cols: [BoardColumn], workspace ws: Workspace) {
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
+
         let movingIDs = Set(cols.map(\.id))
         let sorted = cols.sorted { $0.order < $1.order }
         let spacingX: Double = 400
@@ -757,6 +877,9 @@ struct KanbanBoardView: View {
         let cols = selectedColumns
         guard !cols.isEmpty else { return }
 
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
+
         // Calculate bounds of selected columns
         let minX = cols.map { $0.positionX }.min()!
         let minY = cols.map { $0.positionY + 50 }.min()!
@@ -778,7 +901,7 @@ struct KanbanBoardView: View {
         for col in cols {
             col.workspace = ws
         }
-        selectedColumnIDs.removeAll()
+        clearSelection()
     }
 
     /// Convert screen-space rect to canvas-space rect (accounting for pan & scale)
@@ -790,21 +913,29 @@ struct KanbanBoardView: View {
         return CGRect(x: x, y: y, width: w, height: h)
     }
 
-    /// Update selected columns based on selection rectangle intersection
+    /// Update selected columns and workspaces based on selection rectangle intersection
     private func updateSelectionFromRect(_ screenRect: CGRect) {
         let canvasRect = screenToCanvasRect(screenRect)
-        var ids = Set<UUID>()
+        var colIDs = Set<UUID>()
         for col in columns {
-            // Column frame in canvas space
             let colRect = columnFrames[col.id] ?? CGRect(
                 x: col.positionX, y: col.positionY + 50,
                 width: 320, height: 300
             )
             if canvasRect.intersects(colRect) {
-                ids.insert(col.id)
+                colIDs.insert(col.id)
             }
         }
-        selectedColumnIDs = ids
+        selectedColumnIDs = colIDs
+
+        var wsIDs = Set<UUID>()
+        for ws in workspaces {
+            let wsRect = workspaceBounds(ws)
+            if canvasRect.intersects(wsRect) {
+                wsIDs.insert(ws.id)
+            }
+        }
+        selectedWorkspaceIDs = wsIDs
     }
 
     // MARK: - Canvas Pan / Select & Zoom
@@ -812,13 +943,50 @@ struct KanbanBoardView: View {
     @State private var panStartOffset: CGSize? = nil
     @State private var shiftFlagMonitor: Any?
     @State private var shiftKeyMonitor: Any?
+    @State private var isSpaceHeld = false
+    @State private var spaceOpenHandPushed = false
+    @State private var spaceKeyMonitor: Any?
 
-    /// Monitor Shift key press/release to toggle selection overlay hit testing
+    /// Monitor Shift key press/release to toggle pan overlay hit testing
     private func setupShiftMonitor() {
         shiftFlagMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
             let shiftNow = event.modifierFlags.contains(.shift)
             if shiftNow != isShiftHeld {
                 isShiftHeld = shiftNow
+            }
+            return event
+        }
+
+        // Monitor spacebar for pan mode, and Tab to prevent focus ring on buttons
+        spaceKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+            let responder = NSApp.keyWindow?.firstResponder
+            let isTyping = responder is NSTextView || responder is NSTextField
+
+            // Tab key — eat it to prevent focus ring from appearing on buttons
+            if event.keyCode == 48 && event.type == .keyDown && !isTyping {
+                return nil
+            }
+
+            // Spacebar
+            guard event.keyCode == 49 else { return event }
+            if event.type == .keyDown && event.isARepeat { return isTyping ? event : nil }
+            if !isTyping {
+                let spaceNow = event.type == .keyDown
+                if spaceNow != isSpaceHeld {
+                    isSpaceHeld = spaceNow
+                    if spaceNow {
+                        // Push openHand and remember we did so
+                        NSCursor.openHand.push()
+                        spaceOpenHandPushed = true
+                    } else {
+                        // Pop the space cursor only if not mid-drag (drag's onEnded will handle it)
+                        if !isPanning && spaceOpenHandPushed {
+                            NSCursor.pop()
+                            spaceOpenHandPushed = false
+                        }
+                    }
+                }
+                return nil // consume — prevent reaching focused buttons
             }
             return event
         }
@@ -829,9 +997,13 @@ struct KanbanBoardView: View {
             NSEvent.removeMonitor(monitor)
             shiftFlagMonitor = nil
         }
+        if let monitor = spaceKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            spaceKeyMonitor = nil
+        }
     }
 
-    /// Selection gesture — runs on the transparent overlay (only hit-testable when Shift held)
+    /// Selection gesture — runs on the canvas background (default drag = selection)
     private var selectionDragGesture: some Gesture {
         DragGesture(minimumDistance: 5)
             .onChanged { value in
@@ -856,12 +1028,14 @@ struct KanbanBoardView: View {
             }
     }
 
-    /// Pan gesture — only runs on canvas background (not on overlay)
+    /// Pan gesture — activates when Shift is held, Space is held, or mid-pan
     private var canvasPanGesture: some Gesture {
         DragGesture(minimumDistance: 5)
             .onChanged { value in
                 if panStartOffset == nil {
                     panStartOffset = currentPan
+                    isPanning = true
+                    NSCursor.closedHand.push()
                 }
                 let start = panStartOffset!
                 currentPan = CGSize(
@@ -871,6 +1045,13 @@ struct KanbanBoardView: View {
             }
             .onEnded { _ in
                 panStartOffset = nil
+                isPanning = false
+                NSCursor.pop() // pops closedHand → reveals space's openHand (if pushed) or arrow
+                // If space was released during drag, also pop the space cursor
+                if !isSpaceHeld && spaceOpenHandPushed {
+                    NSCursor.pop()
+                    spaceOpenHandPushed = false
+                }
             }
     }
 

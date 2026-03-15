@@ -17,6 +17,9 @@ final class Board {
     @Relationship(deleteRule: .cascade, inverse: \Workspace.board)
     var workspaces: [Workspace]
 
+    @Relationship(deleteRule: .cascade, inverse: \CardConnection.board)
+    var connections: [CardConnection]
+
     init(
         name: String = "New Board",
         iconName: String = "rectangle.split.3x1",
@@ -31,6 +34,7 @@ final class Board {
         self.order = order
         self.columns = []
         self.workspaces = []
+        self.connections = []
     }
 
     var displayColor: Color {

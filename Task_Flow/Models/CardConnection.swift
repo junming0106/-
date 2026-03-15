@@ -9,6 +9,8 @@ final class CardConnection {
     var toColumnID: UUID
     var colorName: String
 
+    var board: Board?
+
     init(fromColumnID: UUID, toColumnID: UUID, colorName: String = "gray") {
         self.id = UUID()
         self.fromColumnID = fromColumnID

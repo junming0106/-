@@ -4,9 +4,87 @@ import SwiftData
 struct TaskDetailView: View {
     @Bindable var task: TaskItem
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    @Query private var allTasks: [TaskItem]
     @State private var newSubtaskTitle = ""
+    @State private var hasDueDate: Bool = false
+    @State private var dueDate: Date = Date()
 
     var body: some View {
+        VStack(spacing: 0) {
+            sheetHeader
+            Divider().opacity(0.3)
+            sheetBody
+        }
+        .frame(width: 480, height: 560)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+        )
+        .onAppear {
+            hasDueDate = task.dueDate != nil
+            dueDate = task.dueDate ?? Date()
+        }
+        .onChange(of: task.title) { task.updatedAt = Date() }
+        .onChange(of: task.taskDescription) { task.updatedAt = Date() }
+        .onChange(of: task.priority) { task.updatedAt = Date() }
+        .onChange(of: hasDueDate) {
+            task.dueDate = hasDueDate ? dueDate : nil
+            task.updatedAt = Date()
+        }
+        .onChange(of: dueDate) {
+            if hasDueDate {
+                task.dueDate = dueDate
+                task.updatedAt = Date()
+            }
+        }
+    }
+
+    // MARK: - Header
+
+    private var sheetHeader: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "square.text.square")
+                .font(.title2)
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.blue, .purple],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Task Detail")
+                    .font(.headline)
+                    .fontWeight(.semibold)
+
+                if let col = task.column {
+                    Text("in \(col.title)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            Button(action: { dismiss() }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title2)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+    }
+
+    // MARK: - Body
+
+    private var sheetBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 // Title
@@ -16,55 +94,56 @@ struct TaskDetailView: View {
                     .textFieldStyle(.plain)
                     .foregroundStyle(.primary.opacity(0.9))
 
-                // Metadata
-                VStack(spacing: 12) {
-                    metadataRow(icon: "flag", label: "Priority") {
-                        Picker("", selection: $task.priority) {
-                            ForEach(TaskPriority.allCases, id: \.self) { p in
-                                Label(p.rawValue, systemImage: p.icon).tag(p)
+                // Priority
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Priority")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 6) {
+                        ForEach(TaskPriority.allCases, id: \.self) { p in
+                            PriorityChip(
+                                priority: p,
+                                isSelected: task.priority == p
+                            ) {
+                                withAnimation(.spring(response: 0.2)) {
+                                    task.priority = p
+                                }
                             }
                         }
-                        .labelsHidden()
-                        .frame(width: 120)
                     }
+                }
 
-                    Divider().opacity(0.3)
+                // Due Date
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Due Date")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.secondary)
 
-                    metadataRow(icon: "calendar", label: "Due Date") {
-                        if let dueDate = task.dueDate {
-                            DatePicker("", selection: Binding(
-                                get: { dueDate },
-                                set: { task.dueDate = $0 }
-                            ), displayedComponents: [.date, .hourAndMinute])
-                            .labelsHidden()
+                    DueDateButton(
+                        hasDueDate: $hasDueDate,
+                        dueDate: $dueDate
+                    )
+                }
 
-                            Button(action: { task.dueDate = nil }) {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            Button("Set Date") { task.dueDate = Date() }
-                                .buttonStyle(.bordered)
-                        }
-                    }
+                // Created
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Created")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.secondary)
 
-                    Divider().opacity(0.3)
-
-                    metadataRow(icon: "rectangle.split.3x1", label: "Column") {
-                        Text(task.column?.title ?? "—")
-                            .foregroundStyle(.primary)
-                    }
-
-                    Divider().opacity(0.3)
-
-                    metadataRow(icon: "clock", label: "Created") {
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
                         Text(task.createdAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                 }
-                .padding(12)
-                .liquidGlass(cornerRadius: AppTheme.Radius.card)
 
                 // Description
                 VStack(alignment: .leading, spacing: 8) {
@@ -87,32 +166,83 @@ struct TaskDetailView: View {
                 .liquidGlass(cornerRadius: AppTheme.Radius.card)
 
                 // Tags
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Tags", systemImage: "tag")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Tags")
                         .font(.subheadline)
                         .fontWeight(.medium)
                         .foregroundStyle(.secondary)
 
-                    FlowLayout(spacing: 6) {
-                        ForEach(task.tags, id: \.self) { tag in
-                            HStack(spacing: 4) {
-                                Text(tag)
-                                Button(action: { task.tags.removeAll { $0 == tag } }) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.caption2)
+                    // Dropdown to select from existing tags
+                    let allExistingTags = Array(Set(allTasks.flatMap(\.tags))).sorted()
+                    let availableTags = allExistingTags.filter { !task.tags.contains($0) }
+
+                    if !availableTags.isEmpty {
+                        Menu {
+                            ForEach(availableTags, id: \.self) { tag in
+                                Button(action: {
+                                    withAnimation(.spring(response: 0.2)) {
+                                        task.tags.append(tag)
+                                    }
+                                }) {
+                                    Label(tag, systemImage: "tag")
                                 }
-                                .buttonStyle(.plain)
                             }
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(AppTheme.Colors.tagBackground)
-                            .clipShape(Capsule())
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "plus")
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                Text("Add Tag")
+                                    .font(.subheadline)
+                            }
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color.primary.opacity(0.04))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                                    )
+                            )
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                    }
+
+                    // Show currently assigned tags
+                    if !task.tags.isEmpty {
+                        FlowLayout(spacing: 6) {
+                            ForEach(task.tags, id: \.self) { tag in
+                                HStack(spacing: 4) {
+                                    Text(tag)
+                                    Button(action: {
+                                        withAnimation(.spring(response: 0.2)) {
+                                            task.tags.removeAll { $0 == tag }
+                                        }
+                                    }) {
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundStyle(.red)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .font(.caption)
+                                .fontWeight(.medium)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(
+                                    Capsule()
+                                        .fill(Color.accentColor.opacity(0.12))
+                                        .overlay(
+                                            Capsule().stroke(Color.accentColor.opacity(0.2), lineWidth: 0.5)
+                                        )
+                                )
+                            }
                         }
                     }
                 }
-                .padding(12)
-                .liquidGlass(cornerRadius: AppTheme.Radius.card)
 
                 // Subtasks
                 VStack(alignment: .leading, spacing: 8) {
@@ -160,27 +290,11 @@ struct TaskDetailView: View {
                 .padding(12)
                 .liquidGlass(cornerRadius: AppTheme.Radius.card)
             }
-            .padding(20)
+            .padding(24)
         }
-        .onChange(of: task.title) { task.updatedAt = Date() }
-        .onChange(of: task.taskDescription) { task.updatedAt = Date() }
-        .onChange(of: task.priority) { task.updatedAt = Date() }
     }
 
     // MARK: - Helpers
-
-    private func metadataRow<Content: View>(
-        icon: String,
-        label: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        HStack {
-            Label(label, systemImage: icon)
-                .foregroundStyle(.secondary)
-            Spacer()
-            content()
-        }
-    }
 
     private func addSubtask() {
         let trimmed = newSubtaskTitle.trimmingCharacters(in: .whitespaces)

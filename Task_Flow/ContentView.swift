@@ -3,13 +3,14 @@ import SwiftData
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.undoManager) private var undoManager
     @Query(sort: \Board.order) private var boards: [Board]
     @Query(sort: \BoardColumn.order) private var allColumns: [BoardColumn]
     @State private var viewModel = BoardViewModel()
     @State private var selectedBoardID: UUID?
-    @State private var showAIAssistant = false
     @State private var showSettings = false
     @AppStorage("sidebarWidth") private var sidebarWidth: Double = 240
+    @AppStorage("hasSeenWelcome") private var hasSeenWelcome = false
 
     private var selectedBoard: Board? {
         guard let id = selectedBoardID else { return boards.first }
@@ -35,38 +36,33 @@ struct ContentView: View {
         } detail: {
             ZStack(alignment: .bottomTrailing) {
                 if showSettings {
-                    SettingsView()
+                    SettingsView(onTutorialCreated: { boardID in
+                        selectedBoardID = boardID
+                        showSettings = false
+                    })
                 } else if let board = selectedBoard {
-                    HSplitView {
-                        KanbanBoardView(
-                            viewModel: viewModel,
-                            showAIAssistant: $showAIAssistant,
-                            board: board
-                        )
-                        .frame(minWidth: 600)
-
+                    KanbanBoardView(
+                        viewModel: viewModel,
+                        board: board
+                    )
+                    .sheet(isPresented: Binding(
+                        get: { viewModel.selectedTask != nil },
+                        set: { if !$0 { viewModel.selectedTask = nil } }
+                    )) {
                         if let task = viewModel.selectedTask {
                             TaskDetailView(task: task)
-                                .frame(minWidth: 300, idealWidth: 350)
+                                .frame(width: 480, height: 560)
                         }
                     }
                 } else {
                     emptyBoardState
                 }
 
-                // AI Assistant floating panel or button (hidden in settings)
-                if showAIAssistant && !showSettings {
-                    AIAssistantView(isPresented: $showAIAssistant)
-                        .padding(20)
-                        .transition(.asymmetric(
-                            insertion: .scale(scale: 0.9, anchor: .bottomTrailing)
-                                .combined(with: .opacity),
-                            removal: .scale(scale: 0.95, anchor: .bottomTrailing)
-                                .combined(with: .opacity)
-                        ))
-                } else if !showSettings {
+                // AI floating button — opens Quick Input panel (⌃⇧Space)
+                if !showSettings {
                     aiFloatingButton
                 }
+
             }
         }
         .navigationTitle(showSettings ? "Settings" : (selectedBoard?.name ?? "TaskFlow"))
@@ -77,33 +73,26 @@ struct ContentView: View {
                         Label("New Column", systemImage: "plus.rectangle.on.rectangle")
                     }
                     .help("Add New Column")
-
-                    Button(action: {
-                        if viewModel.selectedTask != nil {
-                            viewModel.selectedTask = nil
-                        }
-                    }) {
-                        Label("Close Detail", systemImage: "sidebar.right")
-                    }
-                    .disabled(viewModel.selectedTask == nil)
                 }
             }
         }
         .background {
             Button("") {
-                withAnimation(.spring(response: 0.3)) {
-                    showAIAssistant.toggle()
-                }
+                QuickInputPanel.shared.toggle()
             }
-            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .keyboardShortcut(" ", modifiers: [.control, .shift])
             .hidden()
         }
         .onAppear {
             if boards.isEmpty {
                 createFirstBoard()
             } else {
-                // Migrate orphan columns (from before Board model was added)
                 migrateOrphanColumns()
+                // Add welcome column to first board if not yet seen
+                if !hasSeenWelcome, let board = boards.first {
+                    addWelcomeColumn(to: board)
+                    hasSeenWelcome = true
+                }
             }
         }
     }
@@ -152,9 +141,7 @@ struct ContentView: View {
 
     private var aiFloatingButton: some View {
         Button(action: {
-            withAnimation(.spring(response: 0.3)) {
-                showAIAssistant = true
-            }
+            QuickInputPanel.shared.toggle()
         }) {
             Image(systemName: "sparkles")
                 .font(.title2)
@@ -173,7 +160,7 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .padding(20)
-        .help("AI Assistant (⌘⇧A)")
+        .help("AI Assistant (⌃⇧Space)")
     }
 
     // MARK: - Board CRUD
@@ -189,37 +176,85 @@ struct ContentView: View {
             for col in orphans {
                 col.board = board
             }
+        }
+
+        // First launch — use welcome template as the board content
+        addWelcomeColumn(to: board, startX: 60)
+        hasSeenWelcome = true
+    }
+
+    private func addWelcomeColumn(to board: Board, startX: Double? = nil) {
+        // Place welcome columns: at given startX, or to the left of existing content
+        let resolvedX: Double
+        if let startX {
+            resolvedX = startX
         } else {
-            // Create default columns inside a workspace
-            let defaults: [(String, String, String, Int, Double, Double)] = [
-                ("Backlog", "tray.full", "purple", 0, 0, 40),
-                ("To Do", "checklist.unchecked", "blue", 1, 400, 40),
-                ("In Progress", "hammer", "orange", 2, 800, 40),
-                ("Review", "eye", "teal", 3, 1200, 40),
-                ("Done", "checkmark.circle", "green", 4, 1600, 40),
-            ]
+            let boardColumns = allColumns.filter { $0.board?.id == board.id }
+            let minX = boardColumns.map(\.positionX).min() ?? 60
+            resolvedX = minX - 3 * 400
+        }
+        let startY: Double = 0
 
-            let ws = Workspace(
-                name: "Work Status",
-                positionX: -Workspace.padding,
-                positionY: -Workspace.padding - 28,
-                width: Double(defaults.count) * 400 + Workspace.padding * 2,
-                height: 300 + Workspace.padding * 2 + 28,
-                order: 0
+        // Column definitions: (title, icon, color, order offset)
+        let colDefs: [(String, String, String)] = [
+            ("待辦事項", "list.bullet", "blue"),
+            ("進行中", "figure.run", "yellow"),
+            ("已完成", "checkmark.circle.fill", "green"),
+        ]
+
+        var welcomeColumns: [BoardColumn] = []
+        for (i, (title, icon, color)) in colDefs.enumerated() {
+            let col = BoardColumn(
+                title: title, order: i,
+                colorName: color, iconName: icon,
+                positionX: resolvedX + Double(i) * 400,
+                positionY: startY
             )
-            ws.board = board
-            modelContext.insert(ws)
+            col.board = board
+            modelContext.insert(col)
+            welcomeColumns.append(col)
+        }
 
-            for (title, icon, color, order, x, y) in defaults {
-                let column = BoardColumn(
-                    title: title, order: order,
-                    colorName: color, iconName: icon,
-                    positionX: x, positionY: y
-                )
-                column.board = board
-                column.workspace = ws
-                modelContext.insert(column)
-            }
+        // --- Tasks for "待辦事項" ---
+        let todoTasks: [(String, String, TaskPriority)] = [
+            ("歡迎使用 TaskFlow！",
+             "這是您的任務看板。您可以在這裡管理所有待辦事項。\n\n試試以下操作：\n• 按住 Space 拖曳來平移畫布\n• 雙指捏合或滾輪來縮放\n• 右鍵點擊畫布空白處新增欄位",
+             .medium),
+            ("點擊我查看詳細資訊",
+             "每張卡片都可以設定截止日期、優先級和標籤。\n\n更多操作：\n• 拖放卡片到其他欄位來移動\n• 右鍵欄位可連線、複製、刪除\n• 框選多個欄位，右鍵群組為 Workspace",
+             .low),
+            ("試試復原功能",
+             "TaskFlow 支援 ⌘Z 復原、⌘⇧Z 重做。\n最多可回溯 10 步操作，包含拖曳、刪除、自動排列等。",
+             .low),
+        ]
+        for (i, (title, desc, priority)) in todoTasks.enumerated() {
+            let task = TaskItem(title: title, taskDescription: desc, priority: priority, order: i)
+            task.column = welcomeColumns[0]
+            modelContext.insert(task)
+        }
+
+        // --- Tasks for "進行中" ---
+        let inProgressTasks: [(String, String, TaskPriority)] = [
+            ("探索 AI 助手功能",
+             "按 ⌃⇧Space 開啟 AI 面板。\n\n試試看說：\n• 「幫我新增一個待辦項目」\n• 「將某個任務移到已完成」\n• 「看板摘要」\n\n記得先到 Settings 設定 API Key。",
+             .high),
+        ]
+        for (i, (title, desc, priority)) in inProgressTasks.enumerated() {
+            let task = TaskItem(title: title, taskDescription: desc, priority: priority, order: i)
+            task.column = welcomeColumns[1]
+            modelContext.insert(task)
+        }
+
+        // --- Tasks for "已完成" ---
+        let doneTasks: [(String, String, TaskPriority)] = [
+            ("開啟 TaskFlow",
+             "恭喜您已經完成第一步！\n\n準備好了嗎？您可以隨時刪除這些欄位，開始建立自己的工作流程。\n右鍵欄位 →「刪除」即可。",
+             .medium),
+        ]
+        for (i, (title, desc, priority)) in doneTasks.enumerated() {
+            let task = TaskItem(title: title, taskDescription: desc, priority: priority, order: i)
+            task.column = welcomeColumns[2]
+            modelContext.insert(task)
         }
     }
 
@@ -232,6 +267,9 @@ struct ContentView: View {
     }
 
     private func createBoard() {
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
+
         let board = Board(
             name: "New Board",
             iconName: Board.iconOptions.randomElement() ?? "rectangle.split.3x1",
@@ -277,8 +315,29 @@ struct ContentView: View {
     }
 
     private func deleteBoard(_ board: Board) {
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
+
         let wasSelected = selectedBoardID == board.id
+
+        // Manually delete children bottom-up to avoid SwiftData cascade + UndoManager snapshot crash
+        for column in board.columns {
+            for task in column.tasks {
+                for sub in task.subtasks {
+                    modelContext.delete(sub)
+                }
+                modelContext.delete(task)
+            }
+            modelContext.delete(column)
+        }
+        for conn in board.connections {
+            modelContext.delete(conn)
+        }
+        for ws in board.workspaces {
+            modelContext.delete(ws)
+        }
         modelContext.delete(board)
+
         if wasSelected {
             selectedBoardID = boards.first(where: { $0.id != board.id })?.id
         }

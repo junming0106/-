@@ -35,8 +35,13 @@ struct Task_FlowApp: App {
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
+        let undoManager = UndoManager()
+        undoManager.levelsOfUndo = 10
+
         do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            let container = try ModelContainer(for: schema, configurations: [modelConfiguration])
+            container.mainContext.undoManager = undoManager
+            return container
         } catch {
             // Schema migration failed — remove old store and retry
             let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -47,7 +52,9 @@ struct Task_FlowApp: App {
                 try? FileManager.default.removeItem(at: url)
             }
             do {
-                return try ModelContainer(for: schema, configurations: [modelConfiguration])
+                let container = try ModelContainer(for: schema, configurations: [modelConfiguration])
+                container.mainContext.undoManager = undoManager
+                return container
             } catch {
                 fatalError("Could not create ModelContainer after reset: \(error)")
             }
@@ -55,6 +62,19 @@ struct Task_FlowApp: App {
     }()
 
     @AppStorage("appearanceMode") private var appearanceMode = "system"
+
+    init() {
+        // Configure quick input panel with model container
+        QuickInputPanel.shared.configure(modelContainer: sharedModelContainer)
+
+        // Register global hotkey: Ctrl + Shift + Space
+        GlobalHotkeyManager.shared.onHotkeyPressed = {
+            DispatchQueue.main.async {
+                QuickInputPanel.shared.toggle()
+            }
+        }
+        GlobalHotkeyManager.shared.register()
+    }
 
     var body: some Scene {
         WindowGroup {

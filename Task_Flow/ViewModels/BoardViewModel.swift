@@ -76,8 +76,11 @@ final class BoardViewModel {
         newColumnPosition = nil
     }
 
-    func autoArrangeColumns(_ columns: [BoardColumn], connections: [CardConnection], workspaces: [Workspace]) {
+    func autoArrangeColumns(_ columns: [BoardColumn], connections: [CardConnection], workspaces: [Workspace], undoManager: UndoManager? = nil) {
         guard !columns.isEmpty else { return }
+
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
 
         let spacingX: Double = 400
         let spacingY: Double = 300
@@ -319,7 +322,10 @@ final class BoardViewModel {
         context.insert(task)
     }
 
-    func moveTask(_ task: TaskItem, to targetColumn: BoardColumn, at index: Int) {
+    func moveTask(_ task: TaskItem, to targetColumn: BoardColumn, at index: Int, undoManager: UndoManager? = nil) {
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
+
         task.column = targetColumn
         task.updatedAt = Date()
 
@@ -334,13 +340,19 @@ final class BoardViewModel {
     }
 
     func deleteTask(_ task: TaskItem, context: ModelContext) {
+        for sub in task.subtasks {
+            context.delete(sub)
+        }
         context.delete(task)
         if selectedTask?.id == task.id {
             selectedTask = nil
         }
     }
 
-    func deleteColumn(_ column: BoardColumn, context: ModelContext) {
+    func deleteColumn(_ column: BoardColumn, context: ModelContext, undoManager: UndoManager? = nil) {
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
+
         let colID = column.id
         let descriptor = FetchDescriptor<CardConnection>(
             predicate: #Predicate<CardConnection> {
@@ -352,6 +364,13 @@ final class BoardViewModel {
                 context.delete(conn)
             }
         }
+        // Delete children bottom-up to avoid cascade + UndoManager snapshot crash
+        for task in column.tasks {
+            for sub in task.subtasks {
+                context.delete(sub)
+            }
+            context.delete(task)
+        }
         context.delete(column)
     }
 
@@ -362,7 +381,7 @@ final class BoardViewModel {
         connectionSourceColumn = column
     }
 
-    func finishConnecting(to column: BoardColumn, context: ModelContext) {
+    func finishConnecting(to column: BoardColumn, board: Board? = nil, context: ModelContext) {
         guard let source = connectionSourceColumn, source.id != column.id else {
             cancelConnecting()
             return
@@ -382,6 +401,7 @@ final class BoardViewModel {
         }
 
         let connection = CardConnection(fromColumnID: source.id, toColumnID: column.id)
+        connection.board = board
         context.insert(connection)
         isConnecting = false
         connectionSourceColumn = nil

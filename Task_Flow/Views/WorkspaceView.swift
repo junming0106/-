@@ -22,6 +22,7 @@ struct WorkspaceView: View {
     @State private var currentCursorIsHovering = false
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.undoManager) private var undoManager
 
     private let edgeHitSize: Double = 10
     private let cornerHitSize: Double = 20
@@ -316,10 +317,12 @@ struct WorkspaceView: View {
 
     private func deleteWorkspace() {
         withAnimation(.spring(response: 0.25)) {
+            undoManager?.beginUndoGrouping()
             for col in workspace.columns {
                 col.workspace = nil
             }
             modelContext.delete(workspace)
+            undoManager?.endUndoGrouping()
         }
     }
 
